@@ -6,6 +6,8 @@ from telegram.ext import Application, CommandHandler, CallbackContext
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from keep_alive import keep_alive
+import base64
+import json
 
 # Enable logging
 logging.basicConfig(
@@ -34,15 +36,26 @@ def get_sheet():
     """Connects to Google Sheets and returns the worksheet object."""
     try:
         scope = ["https://spreadsheets.google.com/feeds", 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_name('creds.json', scope)
+
+        # Load credentials from base64 environment variable
+        creds_base64 = os.environ.get("GCREDS_JSON_BASE64")
+        if not creds_base64:
+            logger.error("GCREDS_JSON_BASE64 environment variable not set.")
+            raise ValueError("Missing Google Credentials in environment.")
+
+        # Decode the base64 string to a JSON string, then parse it
+        creds_json = base64.b64decode(creds_base64).decode('utf-8')
+        creds_dict = json.loads(creds_json)
+
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         sheet_id = os.environ.get("SHEET_ID")
         if not sheet_id:
             raise ValueError("Environment variable SHEET_ID not set.")
         sheet = client.open_by_key(sheet_id).sheet1
         return sheet
-    except FileNotFoundError:
-        logger.error("creds.json not found. Please make sure the service account file is in the same directory.")
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        logger.error(f"Credential configuration error: {e}")
         return None
     except Exception as e:
         logger.error(f"Error connecting to Google Sheets: {e}")
