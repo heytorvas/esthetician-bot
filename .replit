@@ -1,0 +1,11 @@
+language = "python"
+run = "python main.py"
+entrypoint = "main.py"
+
+[packager]
+language = "python"
+[packager.features]
+guessImports = true
+enabled = true
+[packager.features.pip]
+specFile = "requirements.txt"
