@@ -152,9 +152,9 @@ async def registrar_command(update: Update, context: CallbackContext) -> None:
 
         # 2. Validate Procedures
         procedures_list = [p.strip().upper() for p in procedures_str.split(',')]
-        valid_procedures_found = [p for p in procedures_list if p in PROCEDURE_DESCRIPTIONS]
-        if not valid_procedures_found:
-            await update.message.reply_text(f"⚠️ Nenhum procedimento válido encontrado. Válidos: {', '.join(PROCEDURE_DESCRIPTIONS.keys())}")
+        valid_procedures_found = [p for p in procedures_list if p in [p.upper() for p in PROCEDURE_DESCRIPTIONS]]
+        if not valid_procedures_found or len(procedures_list) != len(valid_procedures_found):
+            await update.message.reply_text(f"⚠️ Algum procedimento inválido encontrado. Válidos: {', '.join(PROCEDURE_DESCRIPTIONS.keys())}")
             return
 
         # 3. Validate Price
