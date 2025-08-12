@@ -112,7 +112,7 @@ async def listar_command(update: Update, context: CallbackContext) -> None:
         message = f"📋 Registros de {date_str}:\n\n"
         for record in day_records:
             price = float(record['Price'])
-            message += f"• {record['Time']} - {record['Patient']} - {record['Procedures']} - R$ {price:.2f}\n".replace('.', ',')
+            message += f"• {record['Patient']} - {record['Procedures']} - R$ {price:.2f}\n".replace('.', ',')
 
         await update.message.reply_text(message)
 
@@ -124,30 +124,29 @@ async def listar_command(update: Update, context: CallbackContext) -> None:
 async def registrar_command(update: Update, context: CallbackContext) -> None:
     """Saves a new procedure record."""
     try:
-        # Parse arguments: /registrar <patient name...> <DD/MM/YYYY> <HH:MM> <proc1,proc2> <price>
+        # Parse arguments: /registrar <patient name...> <DD/MM/YYYY> <proc1,proc2> <price>
         args = context.args
-        if len(args) < 5:
+        if len(args) < 4:
             await update.message.reply_text(
-                "⚠️ Uso incorreto. Formato: /registrar <Nome do Paciente> <DD/MM/YYYY> <HH:MM> <Proc1,Proc2> <Valor>"
+                "⚠️ Uso incorreto. Formato: /registrar <Nome do Paciente> <DD/MM/YYYY> <Proc1,Proc2> <Valor>"
             )
             return
 
         # Re-assemble arguments to support multi-word names
         price_str = args[-1]
         procedures_str = args[-2]
-        time_str = args[-3]
-        date_str = args[-4]
-        patient = " ".join(args[:-4])
+        date_str = args[-3]
+        patient = " ".join(args[:-3])
 
         if not patient:
              await update.message.reply_text("⚠️ Nome do paciente não pode estar em branco.")
              return
 
-        # 1. Validate Date and Time
+        # 1. Validate Date
         try:
-            datetime_obj = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%Y %H:%M")
+            datetime_obj = datetime.strptime(date_str, "%d/%m/%Y")
         except ValueError:
-            await update.message.reply_text("⚠️ Data ou hora inválida. Use o formato DD/MM/YYYY e HH:MM.")
+            await update.message.reply_text("⚠️ Data inválida. Use o formato DD/MM/YYYY.")
             return
 
         # 2. Validate Procedures
@@ -172,7 +171,6 @@ async def registrar_command(update: Update, context: CallbackContext) -> None:
             
         row = [
             datetime_obj.strftime("%d/%m/%Y"),
-            datetime_obj.strftime("%H:%M"),
             patient,
             ', '.join(valid_procedures_found),
             price
@@ -183,7 +181,7 @@ async def registrar_command(update: Update, context: CallbackContext) -> None:
         reply_message = (
             f"✅ Registro salvo!\n"
             f"Paciente: {patient}\n"
-            f"Data/Hora: {datetime_obj.strftime('%d/%m/%Y %H:%M')}\n"
+            f"Data: {datetime_obj.strftime('%d/%m/%Y')}\n"
             f"Procedimentos: {', '.join(valid_procedures_found)}\n"
             f"Valor total: R$ {price:.2f}".replace('.', ',')
         )
