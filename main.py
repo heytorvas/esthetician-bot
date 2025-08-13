@@ -2,10 +2,10 @@ import base64
 import json
 import logging
 import os
-import re
 import unicodedata
 from collections import defaultdict
 from datetime import datetime, timedelta
+from typing import List, Optional, Tuple
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -33,8 +33,10 @@ logger = logging.getLogger(__name__)
 (
     MENU,
     # Registrar States
-    REG_SELECTING_DATE,
-    REG_ENTERING_RECORD,
+    REG_AWAITING_DATE,
+    REG_AWAITING_PATIENT,
+    REG_SELECTING_PROCEDURES,
+    REG_SELECTING_PRICE,
     REG_CONFIRMING_MORE,
     # Listar States
     LISTAR_AWAITING_DATE,
@@ -44,7 +46,7 @@ logger = logging.getLogger(__name__)
     CALC_AWAITING_RANGE,
     # Analytics States
     ANALYTICS_MENU,
-) = range(9)
+) = range(10)
 
 
 # --- Constants ---
@@ -61,6 +63,7 @@ PROCEDURE_DESCRIPTIONS = {
     "3mh": "3MH",
     "compex": "Compex",
 }
+VALID_PRICES = [5, 10, 15, 20]
 
 
 # --- Utility Functions ---
@@ -74,71 +77,13 @@ def slugify(text):
 
 def parse_record_text(text: str, procedure_descriptions: dict) -> tuple[str, list[str], float] | None:
     """
-    Parses a text string to extract patient name, procedures, and price.
-
-    Args:
-        text: The input string (e.g., "Tom Brady Pós Operatório, Limpeza de Pele 150.50").
-        procedure_descriptions: A dictionary mapping slugs to full procedure names.
-
-    Returns:
-        A tuple containing (patient_name, list_of_found_procedures, price),
-        or None if parsing fails.
+    DEPRECATED: This function is no longer used in the interactive registration flow
+    but is kept for reference or potential future use.
     """
-    args = text.split()
-    if len(args) < 2:
-        return None
-
-    # 1. Extract and validate the price from the end of the string
-    try:
-        price = float(args[-1].replace(',', '.'))
-        name_and_procs_text = " ".join(args[:-1]).strip()
-    except ValueError:
-        return None # Price not found or invalid
-
-    # 2. Create a master regex to find all known procedures flexibly.
-    # This is the robust way to handle variations in user input.
-    sorted_proc_names = sorted(procedure_descriptions.values(), key=len, reverse=True)
-    proc_patterns = []
-    for name in sorted_proc_names:
-        # Split by space to handle multi-word procedures
-        words = name.split(' ')
-        processed_words = []
-        for word in words:
-            # Handle accents for each word
-            word_pattern = word.replace('á', '[aá]').replace('é', '[eé]').replace('í', '[ií]').replace('ó', '[oó]').replace('ú', '[uú]').replace('â', '[aâ]').replace('ê', '[eê]').replace('ô', '[oô]').replace('ã', '[aã]').replace('õ', '[oõ]').replace('ç', '[cç]')
-            processed_words.append(word_pattern)
-
-        # Join the processed words with the flexible separator
-        pattern = r'[-\s,]*'.join(processed_words)
-        proc_patterns.append(pattern)
-
-    master_pattern = re.compile('|'.join(proc_patterns), re.IGNORECASE)
-
-    # 3. Find all procedure matches in the text
-    matches = list(master_pattern.finditer(name_and_procs_text))
-    if not matches:
-        return None # No valid procedures found
-
-    # 4. Reconstruct the patient's name from the parts of the string that are not procedures
-    patient_parts = []
-    last_index = 0
-    for match in matches:
-        patient_parts.append(name_and_procs_text[last_index:match.start()])
-        last_index = match.end()
-    patient_parts.append(name_and_procs_text[last_index:])
-
-    patient_name = "".join(patient_parts).strip(" ,-")
-    if not patient_name:
-        return None # Patient name could not be determined
-
-    # 5. Normalize the found procedures back to their canonical names
-    slug_to_name_map = {slugify(name): name for name in procedure_descriptions.values()}
-    found_procedures = [slug_to_name_map[slugify(match.group(0))] for match in matches]
-
-    return patient_name, found_procedures, price
+    return None
 
 
-def get_records_in_range(sheet, start_date: datetime.date, end_date: datetime.date) -> list[dict]:
+def get_records_in_range(sheet, start_date: datetime.date, end_date: datetime.date) -> List[dict]:
     """Fetches all records from the sheet and filters them by a date range."""
     all_records = sheet.get_all_records()
     filtered_records = []
@@ -153,7 +98,7 @@ def get_records_in_range(sheet, start_date: datetime.date, end_date: datetime.da
     return filtered_records
 
 
-def get_date_range_for_sum(mode: str, date_input: str | None) -> tuple[datetime.date, datetime.date, str] | None:
+def get_date_range_for_sum(mode: str, date_input: str | None) -> Optional[Tuple[datetime.date, datetime.date, str]]:
     """Calculates the start date, end date, and a descriptive string for a given mode."""
     now = datetime.now()
     try:
@@ -329,7 +274,8 @@ async def analytics_router(update: Update, context: CallbackContext) -> int:
         await analytics_show_patients(update, processed_records)
 
     # After showing the report, show the analytics menu again
-    await query.message.reply_text("Use /menu para voltar ao menu principal ou escolha outra análise abaixo.")
+    if query.message:
+        await query.message.reply_text("Use /menu para voltar ao menu principal ou escolha outra análise abaixo.")
     await analytics_start(update, context)
     return ANALYTICS_MENU
 
@@ -437,6 +383,217 @@ async def analytics_show_patients(update: Update, records: list[dict]):
     await update.effective_message.reply_text(message, parse_mode='Markdown')
 
 
+# --- REGISTRAR Conversation ---
+async def registrar_start(update: Update, context: CallbackContext) -> int:
+    """Starts the conversation to register a new record."""
+    context.user_data.clear() # Clear data from any previous conversation
+    keyboard = [
+        [InlineKeyboardButton("Hoje", callback_data="reg_today")],
+        [InlineKeyboardButton("Outra data (DD/MM)", callback_data="reg_other_date")],
+        [InlineKeyboardButton("🔙 Voltar ao Menu", callback_data="menu_back")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    message = "📅 Para qual data você deseja registrar o novo atendimento?"
+    await update.callback_query.edit_message_text(text=message, reply_markup=reply_markup)
+    return REG_AWAITING_DATE
+
+
+async def registrar_date_selection(update: Update, context: CallbackContext) -> int:
+    """Handles the user's date choice and asks for the patient's name."""
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+
+    if choice == "reg_today":
+        context.user_data['date'] = datetime.now().date()
+        await query.edit_message_text("👤 Por favor, digite o nome do(a) paciente.")
+        return REG_AWAITING_PATIENT
+    elif choice == "reg_other_date":
+        await query.edit_message_text("📅 Por favor, digite a data no formato `DD/MM`.")
+        return REG_AWAITING_DATE # Wait for user to type date
+    return ConversationHandler.END
+
+
+async def registrar_receive_custom_date(update: Update, context: CallbackContext) -> int:
+    """Receives a custom date from the user and asks for the patient's name."""
+    date_str = update.message.text
+    try:
+        current_year = datetime.now().year
+        target_date = datetime.strptime(f"{date_str}/{current_year}", "%d/%m/%Y").date()
+        context.user_data['date'] = target_date
+        await update.message.reply_text("👤 Por favor, digite o nome do(a) paciente.")
+        return REG_AWAITING_PATIENT
+    except ValueError:
+        await update.message.reply_text("⚠️ Data inválida. Use o formato DD/MM. Tente novamente ou use /cancelar.")
+        return REG_AWAITING_DATE
+
+
+def build_procedures_keyboard(selected_slugs: set) -> InlineKeyboardMarkup:
+    """Builds the keyboard for procedure selection with checkmarks."""
+    keyboard = []
+    for slug, description in PROCEDURE_DESCRIPTIONS.items():
+        text = f"✅ {description}" if slug in selected_slugs else f"⬜️ {description}"
+        keyboard.append([InlineKeyboardButton(text, callback_data=f"proc_{slug}")])
+    keyboard.append([InlineKeyboardButton("➡️ Continuar", callback_data="proc_done")])
+    keyboard.append([InlineKeyboardButton("🔙 Cancelar", callback_data="cancel")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def registrar_receive_patient(update: Update, context: CallbackContext) -> int:
+    """Receives the patient's name and shows the procedure selection."""
+    patient_name = update.message.text.strip()
+    if not patient_name:
+        await update.message.reply_text("⚠️ Nome do paciente não pode ser vazio. Por favor, tente novamente.")
+        return REG_AWAITING_PATIENT
+
+    context.user_data['patient'] = patient_name
+    context.user_data['selected_procedures'] = set()
+
+    reply_markup = build_procedures_keyboard(set())
+    await update.message.reply_text(
+        "📋 Selecione um ou mais procedimentos. Clique em 'Continuar' quando terminar.",
+        reply_markup=reply_markup
+    )
+    return REG_SELECTING_PROCEDURES
+
+
+async def registrar_procedure_selection(update: Update, context: CallbackContext) -> int:
+    """Handles the interactive procedure selection."""
+    query = update.callback_query
+    await query.answer()
+    callback_data = query.data
+
+    if callback_data == "cancel":
+        await query.edit_message_text("Operação cancelada.")
+        return await menu_command(update, context)
+
+    selected_procedures = context.user_data.get('selected_procedures', set())
+
+    if callback_data == "proc_done":
+        if not selected_procedures:
+            await context.bot.answer_callback_query(query.id, "⚠️ Você deve selecionar pelo menos um procedimento.", show_alert=True)
+            return REG_SELECTING_PROCEDURES
+
+        # Build price keyboard
+        price_keyboard = [
+            [InlineKeyboardButton(f"R$ {price:.2f}".replace('.', ','), callback_data=f"price_{price}") for price in VALID_PRICES],
+            [InlineKeyboardButton("🔙 Voltar", callback_data="price_back")]
+        ]
+        await query.edit_message_text(
+            "💰 Selecione o valor do atendimento:",
+            reply_markup=InlineKeyboardMarkup(price_keyboard)
+        )
+        return REG_SELECTING_PRICE
+
+    # Toggle procedure selection
+    proc_slug = callback_data.replace("proc_", "")
+    if proc_slug in selected_procedures:
+        selected_procedures.remove(proc_slug)
+    else:
+        selected_procedures.add(proc_slug)
+
+    context.user_data['selected_procedures'] = selected_procedures
+    reply_markup = build_procedures_keyboard(selected_procedures)
+    await query.edit_message_text(
+        "📋 Selecione um ou mais procedimentos. Clique em 'Continuar' quando terminar.",
+        reply_markup=reply_markup
+    )
+    return REG_SELECTING_PROCEDURES
+
+
+async def registrar_price_selection(update: Update, context: CallbackContext) -> int:
+    """Handles the price selection and saves the record."""
+    query = update.callback_query
+    await query.answer()
+    callback_data = query.data
+
+    if callback_data == "price_back":
+        reply_markup = build_procedures_keyboard(context.user_data.get('selected_procedures', set()))
+        await query.edit_message_text(
+            "📋 Selecione um ou mais procedimentos. Clique em 'Continuar' quando terminar.",
+            reply_markup=reply_markup
+        )
+        return REG_SELECTING_PROCEDURES
+
+    price = int(callback_data.replace("price_", ""))
+    context.user_data['price'] = price
+
+    # All data collected, now save it
+    return await save_record_and_summarize(update, context)
+
+
+async def save_record_and_summarize(update: Update, context: CallbackContext) -> int:
+    """Saves the collected data to the spreadsheet and shows a summary."""
+    query = update.callback_query
+    sheet = get_sheet()
+    if not sheet:
+        await query.edit_message_text("⚠️ Erro de configuração: Não foi possível conectar à planilha.")
+        return ConversationHandler.END
+
+    try:
+        user_data = context.user_data
+        date_obj = user_data['date']
+        patient = user_data['patient'].upper()
+        procedure_slugs = sorted(list(user_data['selected_procedures']))
+        procedure_names = [PROCEDURE_DESCRIPTIONS[slug] for slug in procedure_slugs]
+        price = user_data['price']
+
+        row = [
+            date_obj.strftime("%d/%m/%Y"),
+            patient,
+            ', '.join(procedure_names).upper(),
+            price
+        ]
+        sheet.append_row(row)
+
+        summary_text = (
+            f"✅ *Atendimento Salvo com Sucesso!*\n\n"
+            f"📅 *Data:* {date_obj.strftime('%d/%m/%Y')}\n"
+            f"👤 *Paciente:* {patient.title()}\n"
+            f"📋 *Procedimentos:* {', '.join(procedure_names)}\n"
+            f"💰 *Valor:* R$ {price:.2f}".replace('.', ',')
+        )
+        await query.edit_message_text(summary_text, parse_mode='Markdown')
+
+        # Ask to add another
+        keyboard = [
+            [InlineKeyboardButton("Sim, para a mesma data", callback_data="reg_another_yes")],
+            [InlineKeyboardButton("Não, voltar ao menu", callback_data="reg_another_no")],
+        ]
+        await query.message.reply_text(
+            "Deseja registrar outro atendimento?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return REG_CONFIRMING_MORE
+
+    except Exception as e:
+        logger.error(f"Failed to save record: {e}")
+        await query.edit_message_text(f"⚠️ Ocorreu um erro ao salvar o registro: {e}")
+        return ConversationHandler.END
+
+
+async def registrar_confirm_more(update: Update, context: CallbackContext) -> int:
+    """Handles user's choice to add another record or finish."""
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+
+    if choice == "reg_another_yes":
+        # Keep the date, clear other data
+        date = context.user_data.get('date')
+        context.user_data.clear()
+        context.user_data['date'] = date
+        await query.edit_message_text("👤 Por favor, digite o nome do(a) próximo(a) paciente.")
+        return REG_AWAITING_PATIENT
+    else: # 'reg_another_no'
+        date_obj = context.user_data.get('date')
+        await query.edit_message_text("Ok, operação finalizada.")
+        context.user_data.clear()
+        # Show summary for the day
+        await list_records_for_date(update, context, date_obj)
+        return ConversationHandler.END
+
+
 # --- LISTAR Conversation ---
 async def listar_start(update: Update, context: CallbackContext) -> int:
     """Starts the conversation to list records for a day."""
@@ -459,7 +616,8 @@ async def listar_date_selection(update: Update, context: CallbackContext) -> int
 
     if choice == "list_today":
         selected_date = datetime.now().date()
-        return await list_records_for_date(update, context, selected_date)
+        await list_records_for_date(update, context, selected_date)
+        return ConversationHandler.END
     elif choice == "list_other_date":
         await query.edit_message_text("📅 Por favor, digite a data no formato `DD/MM`.")
         return LISTAR_AWAITING_DATE
@@ -479,12 +637,12 @@ async def listar_receive_date(update: Update, context: CallbackContext) -> int:
         return LISTAR_AWAITING_DATE
 
 
-async def list_records_for_date(update: Update, context: CallbackContext, target_date: datetime.date) -> None:
+async def list_records_for_date(update: Update, context: CallbackContext, target_date: datetime.date) -> int:
     """Fetches and displays records for a specific date."""
     sheet = get_sheet()
     if not sheet:
         await update.effective_message.reply_text("⚠️ Erro de configuração: Não foi possível conectar à planilha. Operação cancelada.")
-        return
+        return ConversationHandler.END
 
     try:
         day_records = get_records_in_range(sheet, target_date, target_date)
@@ -492,163 +650,32 @@ async def list_records_for_date(update: Update, context: CallbackContext, target
 
         if not day_records:
             await update.effective_message.reply_text(f"ℹ️ Nenhum atendimento encontrado para o dia {date_str}.")
-        else:
-            message = f"📋 *Atendimentos de {date_str}*\n\n"
-            total_day_price = 0.0
-            for record in day_records:
-                procedure_slugs = [slugify(p.strip()) for p in record.get('Procedures', '').split(',')]
-                procedure_names = [PROCEDURE_DESCRIPTIONS.get(slug, slug.upper()) for slug in procedure_slugs]
-                patient_name = record.get('Patient', '').title()
-                price = record['Price']
-                price_str = f"{price:.2f}".replace('.', ',')
-                message += f"Paciente: *{patient_name}*\nProcedimentos: *{', '.join(procedure_names)}*\nValor: *R$ {price_str}*\n\n"
-                total_day_price += price
+            await send_final_message(update)
+            return ConversationHandler.END
 
-            total_price_str = f"{total_day_price:.2f}".replace('.', ',')
-            message += f"💰 *Total do dia: {total_price_str}*"
-            await update.effective_message.reply_text(message, parse_mode='Markdown')
+        message = f"📋 *Atendimentos de {date_str}*\n\n"
+        total_day_price = 0.0
+        for record in day_records:
+            procedure_slugs = [slugify(p.strip()) for p in record.get('Procedures', '').split(',')]
+            procedure_names = [PROCEDURE_DESCRIPTIONS.get(slug, slug.upper()) for slug in procedure_slugs]
+            patient_name = record.get('Patient', '').title()
+            price = record.get('Price', 0.0)
+            total_day_price += price
+            message += (
+                f"👤 *Paciente:* {patient_name}\n"
+                f"   *Procedimentos:* {', '.join(procedure_names)}\n"
+                f"   *Valor:* R$ {price:.2f}\n\n".replace('.', ',')
+            )
+
+        message += f"💰 *Total do dia:* R$ {total_day_price:.2f}".replace('.', ',')
+        await update.effective_message.reply_text(message, parse_mode='Markdown')
+        await send_final_message(update)
+        return ConversationHandler.END
 
     except Exception as e:
-        logger.error(f"Error in list_records_for_date: {e}")
+        logger.error(f"Error listing records: {e}")
         await update.effective_message.reply_text(f"⚠️ Erro ao buscar registros: {e}")
-
-    await send_final_message(update)
-
-
-# --- REGISTRAR Conversation ---
-async def registrar_start(update: Update, context: CallbackContext) -> int:
-    """Starts the registration conversation by asking for the date."""
-    context.user_data['records_for_date'] = []
-    keyboard = [
-        [InlineKeyboardButton("Hoje", callback_data="reg_today")],
-        [InlineKeyboardButton("Outra data (DD/MM)", callback_data="reg_other_date")],
-        [InlineKeyboardButton("🔙 Voltar ao Menu", callback_data="menu_back")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    message_text = "🗓️ Para qual data você deseja registrar um atendimento?"
-    await update.callback_query.edit_message_text(text=message_text, reply_markup=reply_markup)
-    return REG_SELECTING_DATE
-
-
-async def registrar_date_selection(update: Update, context: CallbackContext) -> int:
-    """Handles the user's date choice."""
-    query = update.callback_query
-    await query.answer()
-    choice = query.data
-
-    if choice == "reg_today":
-        selected_date = datetime.now().date()
-        context.user_data['selected_date'] = selected_date
-        await query.edit_message_text(f"Data selecionada: {selected_date.strftime('%d/%m/%Y')}. \n\n✍️ Agora, por favor, insira o atendimento no formato:\n`<Nome do Paciente> <Procedimentos> <Valor>`")
-        return REG_ENTERING_RECORD
-    elif choice == "reg_other_date":
-        await query.edit_message_text("📅 Por favor, digite a data no formato `DD/MM`.")
-        return REG_SELECTING_DATE
-    return ConversationHandler.END
-
-
-async def registrar_receive_custom_date(update: Update, context: CallbackContext) -> int:
-    """Parses a custom date in DD/MM format."""
-    date_str = update.message.text
-    try:
-        current_year = datetime.now().year
-        selected_date = datetime.strptime(f"{date_str}/{current_year}", "%d/%m/%Y").date()
-        context.user_data['selected_date'] = selected_date
-        await update.message.reply_text(f"Data selecionada: {selected_date.strftime('%d/%m/%Y')}. \n\n✍️ Agora, por favor, insira o atendimento no formato:\n`<Nome do Paciente> <Procedimentos> <Valor>`")
-        return REG_ENTERING_RECORD
-    except ValueError:
-        await update.message.reply_text("⚠️ Data inválida. Por favor, use o formato `DD/MM`. Tente novamente ou use /cancelar.")
-        return REG_SELECTING_DATE
-
-
-async def registrar_receive_record(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Receives and processes a single record entry by calling the parsing utility."""
-    full_text = update.message.text
-
-    parsed_data = parse_record_text(full_text, PROCEDURE_DESCRIPTIONS)
-
-    if not parsed_data:
-        await update.message.reply_text(
-            "⚠️ Formato inválido. Não consegui entender a sua mensagem.\n\n"
-            "Use o formato: `<Nome do Paciente> <Procedimentos> <Valor>`\n"
-            "Exemplo: `Maria Silva Pós Operatório 150`"
-        )
-        return REG_ENTERING_RECORD
-
-    patient, found_procedures, price = parsed_data
-
-    valid_procedures_slugs = [slugify(p) for p in found_procedures]
-
-    sheet = get_sheet()
-    if not sheet:
-        await update.message.reply_text("⚠️ Erro de configuração: Não foi possível conectar à planilha.")
         return ConversationHandler.END
-
-    # Store data in uppercase
-    patient_upper = patient.upper()
-    procedures_upper = ', '.join(slug.upper() for slug in valid_procedures_slugs)
-    row = [context.user_data['selected_date'].strftime("%d/%m/%Y"), patient_upper, procedures_upper, price]
-
-    try:
-        sheet.append_row(row)
-        # For display, use proper names
-        procedure_full_names = sorted([PROCEDURE_DESCRIPTIONS[slug] for slug in valid_procedures_slugs])
-
-        context.user_data.setdefault('records_for_date', []).append({
-            "patient": patient.title(),
-            "procedures": ', '.join(procedure_full_names),
-            "price": price
-        })
-
-        price_str = f"R$ {price:.2f}".replace('.', ',')
-        reply_message = (
-            f"✅ *Atendimento Salvo!*\n\n"
-            f"Paciente: *{patient.title()}*\n"
-            f"Procedimentos: *{', '.join(procedure_full_names)}*\n"
-            f"Valor: *{price_str}*"
-        )
-        await update.message.reply_text(reply_message, parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Error saving to sheet in conversation: {e}")
-        await update.message.reply_text(f"⚠️ Ocorreu um erro ao salvar na planilha: {e}")
-        return REG_ENTERING_RECORD
-
-    keyboard = [[InlineKeyboardButton("Sim", callback_data="reg_more_yes"), InlineKeyboardButton("Não", callback_data="reg_more_no")]]
-    await update.message.reply_text("Deseja inserir outro atendimento para esta mesma data?", reply_markup=InlineKeyboardMarkup(keyboard))
-    return REG_CONFIRMING_MORE
-
-
-async def registrar_confirm_more(update: Update, context: CallbackContext) -> int:
-    """Handles user choice to add more records or finish."""
-    query = update.callback_query
-    await query.answer()
-    if query.data == "reg_more_yes":
-        await query.edit_message_text("✍️ Ok, insira o próximo atendimento...")
-        return REG_ENTERING_RECORD
-    else:
-        await query.edit_message_text("✅ Concluído!")
-        await end_registration_and_summarize(update, context)
-        return ConversationHandler.END
-
-
-async def end_registration_and_summarize(update: Update, context: CallbackContext):
-    """
-    Displays a summary of all records for the selected date by re-fetching them
-    from the spreadsheet to ensure data is up-to-date.
-    """
-    selected_date = context.user_data.get('selected_date')
-    if not selected_date:
-        logger.warning("end_registration_and_summarize called without a selected_date.")
-        await update.effective_message.reply_text("Não foi possível gerar o resumo. Por favor, use o comando /listar para ver os registros.")
-        return
-
-    await update.effective_message.reply_text(f"Gerando resumo final para {selected_date.strftime('%d/%m/%Y')}...")
-
-    # Reuse the existing function to fetch, format, and send the summary for the selected date.
-    # This ensures the summary is always accurate and reflects all records in the sheet.
-    await list_records_for_date(update, context, selected_date)
-
-    context.user_data.clear()
 
 
 # --- CALCULAR Conversation ---
@@ -678,7 +705,8 @@ async def calcular_mode_selection(update: Update, context: CallbackContext) -> i
     context.user_data['calc_mode'] = mode
 
     if period in ['today', 'this']:
-        return await process_sum_calculation(update, context, None)
+        await process_sum_calculation(update, context, None)
+        return ConversationHandler.END
 
     prompts = {
         'dia': "📅 Digite o dia (DD/MM/YYYY):",
@@ -702,7 +730,7 @@ async def calcular_receive_range(update: Update, context: CallbackContext) -> in
     return ConversationHandler.END
 
 
-async def process_sum_calculation(update: Update, context: ContextTypes.DEFAULT_TYPE, date_input: str | None) -> None:
+async def process_sum_calculation(update: Update, context: ContextTypes.DEFAULT_TYPE, date_input: str | None) -> int:
     """Fetches data and calculates the sum for the given mode and date."""
     mode = context.user_data.get('calc_mode')
 
@@ -711,17 +739,16 @@ async def process_sum_calculation(update: Update, context: ContextTypes.DEFAULT_
         await update.effective_message.reply_text("⚠️ Data em formato inválido. Tente novamente ou /cancelar.")
         # Determine which state to return to based on the mode
         if mode == 'periodo':
-            context.user_data['next_state'] = CALC_AWAITING_RANGE
+            return CALC_AWAITING_RANGE
         else:
-            context.user_data['next_state'] = CALC_AWAITING_DATE
-        return
+            return CALC_AWAITING_DATE
 
     start_date, end_date, period_str = date_range_data
 
     sheet = get_sheet()
     if not sheet:
         await update.effective_message.reply_text("⚠️ Erro de configuração: Não foi possível conectar à planilha.")
-        return
+        return ConversationHandler.END
 
     try:
         records_in_range = get_records_in_range(sheet, start_date, end_date)
@@ -761,6 +788,7 @@ async def process_sum_calculation(update: Update, context: ContextTypes.DEFAULT_
 
     await send_final_message(update)
     context.user_data.clear()
+    return ConversationHandler.END
 
 
 async def cancel_command(update: Update, context: CallbackContext) -> int:
@@ -792,38 +820,67 @@ def main() -> None:
 
     application = Application.builder().token(bot_token).post_init(post_init).build()
 
+    # Analytics reports
+    analytics_handler = CallbackQueryHandler(analytics_router, pattern="^analytics_")
+
+    # Conversation handler for the main menu
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", menu_command), CommandHandler("menu", menu_command)],
+        entry_points=[
+            CommandHandler("menu", menu_command),
+            CommandHandler("start", menu_command),
+            CallbackQueryHandler(menu_router, pattern="^menu_"),
+        ],
         states={
-            MENU: [CallbackQueryHandler(menu_router, pattern='^menu_')],
-            # Registrar States
-            REG_SELECTING_DATE: [
-                CallbackQueryHandler(registrar_date_selection, pattern='^reg_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, registrar_receive_custom_date)
+            MENU: [
+                CallbackQueryHandler(menu_router, pattern="^menu_"),
             ],
-            REG_ENTERING_RECORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, registrar_receive_record)],
-            REG_CONFIRMING_MORE: [CallbackQueryHandler(registrar_confirm_more, pattern='^reg_more_')],
-            # Listar States
+            REG_AWAITING_DATE: [
+                CallbackQueryHandler(registrar_date_selection, pattern="^reg_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, registrar_receive_custom_date),
+            ],
+            REG_AWAITING_PATIENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, registrar_receive_patient)
+            ],
+            REG_SELECTING_PROCEDURES: [
+                CallbackQueryHandler(registrar_procedure_selection, pattern="^proc_")
+            ],
+            REG_SELECTING_PRICE: [
+                CallbackQueryHandler(registrar_price_selection, pattern="^price_")
+            ],
+            REG_CONFIRMING_MORE: [
+                CallbackQueryHandler(registrar_confirm_more, pattern="^reg_another_")
+            ],
             LISTAR_AWAITING_DATE: [
-                CallbackQueryHandler(listar_date_selection, pattern='^list_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, listar_receive_date)
+                CallbackQueryHandler(listar_date_selection, pattern="^list_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, listar_receive_date),
             ],
-            # Analytics States
-            ANALYTICS_MENU: [CallbackQueryHandler(analytics_router, pattern='^analytics_')],
-            # Calcular States
-            CALC_SELECTING_MODE: [CallbackQueryHandler(calcular_mode_selection, pattern='^calc_')],
-            CALC_AWAITING_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, calcular_receive_date)],
-            CALC_AWAITING_RANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, calcular_receive_range)],
+            CALC_SELECTING_MODE: [
+                CallbackQueryHandler(calcular_mode_selection, pattern="^calc_")
+            ],
+            CALC_AWAITING_DATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, calcular_receive_date)
+            ],
+            CALC_AWAITING_RANGE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, calcular_receive_range)
+            ],
+            ANALYTICS_MENU: [
+                analytics_handler,
+                CallbackQueryHandler(menu_command, pattern="^menu_back"),
+            ],
         },
         fallbacks=[
             CommandHandler("cancelar", cancel_command),
-            CallbackQueryHandler(menu_command, pattern='^menu_back$')
+            CallbackQueryHandler(cancel_command, pattern="^cancel$"),
+            CallbackQueryHandler(menu_command, pattern="^menu_back"),
         ],
+        map_to_parent={
+            ConversationHandler.END: MENU
+        }
     )
 
     application.add_handler(conv_handler)
     application.run_polling()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
