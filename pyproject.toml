@@ -12,4 +12,29 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = []
+dev = [
+    "ruff>=0.12.8",
+]
+
+[tool.ruff]
+include = ["./*.py", "./**/*.py"]
+line-length = 100
+indent-width = 4
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "ANN401", # (any-type)
+    "COM812", # (missing-trailing-comma)
+    "D100",  # (undocumented-public-module)
+    "D101", # (undocument-public-class)
+    "D102", # (undocumented-public-method)
+    "D103", # (undocumented-public-function)
+    "D104", # (undocumented-public-package)
+    "D105",  # (undocumented-magic-method)
+    "D107",  # (undocumented-public-init)
+    "D203", # (one-blank-line-before-class)
+    "D213", # (multi-line-summary-second-line)
+]
+extend-select = ["I"]
