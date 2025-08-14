@@ -173,9 +173,7 @@ async def process_sum_calculation(
                 record_text = "atendimento" if record_count == 1 else "atendimentos"
 
                 # Add a more structured header for the day
-                message_parts.append(
-                    f"🗓️ *{date_str}* ({record_count} {record_text}) | *Total do Dia:* R$ {day_total_str}"
-                )
+                message_parts.append(f"🗓️ *{date_str}* ({record_count} {record_text})")
 
                 # Add individual records for the day
                 for record in day_records:
@@ -189,6 +187,8 @@ async def process_sum_calculation(
                     price = record.get("Price", 0.0)
                     price_str = f"{price:.2f}".replace(".", ",")
                     message_parts.append(f"  • *{patient}* | {procs_display} | R$ {price_str}")
+
+                message_parts.append(f"\n💰 *Total do Dia:* R$ {day_total_str}\n")
 
             # Add a final separator before the grand total if applicable
             if mode != "dia" and len(sorted_dates) > 1:
