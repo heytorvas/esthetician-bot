@@ -5,7 +5,7 @@ import os
 import unicodedata
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -15,9 +15,9 @@ from telegram.ext import (
     CallbackQueryHandler,
     CallbackContext,
     CommandHandler,
+    MessageHandler,
     ContextTypes,
     ConversationHandler,
-    MessageHandler,
     filters,
 )
 
@@ -87,7 +87,7 @@ def parse_record_text(text: str, procedure_descriptions: dict) -> tuple[str, lis
     return None
 
 
-def get_records_in_range(sheet, start_date: datetime.date, end_date: datetime.date) -> List[dict]:
+def get_records_in_range(sheet, start_date, end_date) -> List[Dict]:
     """Fetches all records from the sheet and filters them by a date range."""
     all_records = sheet.get_all_records()
     filtered_records = []
@@ -102,9 +102,13 @@ def get_records_in_range(sheet, start_date: datetime.date, end_date: datetime.da
     return filtered_records
 
 
+def get_brazil_datetime_now():
+    return datetime.now() - timedelta(hours=3)
+
+
 def get_date_range_for_sum(mode: str, date_input: str | None) -> Optional[Tuple[datetime.date, datetime.date, str]]:
     """Calculates the start date, end date, and a descriptive string for a given mode."""
-    now = datetime.now()
+    now = get_brazil_datetime_now()
     try:
         if mode == 'dia':
             day_str = date_input or now.strftime("%d/%m/%Y")
@@ -215,7 +219,7 @@ async def menu_router(update: Update, context: CallbackContext) -> int:
         return await analytics_start(update, context)
     elif command == 'menu_procedimentos':
         await procedimentos_command(update, context)
-        await query.edit_message_text("Lista de procedimentos exibida acima. Use /menu para voltar ao menu.")
+        await send_final_message(update)
         return ConversationHandler.END
 
     return ConversationHandler.END
@@ -226,7 +230,10 @@ async def procedimentos_command(update: Update, context: CallbackContext) -> Non
     message = "📋 Procedimentos Disponíveis:\n\n"
     for slug, description in PROCEDURE_DESCRIPTIONS.items():
         message += f"• {description}\n"
-    await update.effective_message.reply_text(message)
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message)
+    else:
+        await update.effective_message.reply_text(message)
 
 
 # --- Analytics ---
@@ -271,23 +278,24 @@ async def analytics_router(update: Update, context: CallbackContext) -> int:
         except (ValueError, TypeError):
             continue # Skip malformed records
 
+    message_text = "Comando não reconhecido."
     if command == 'analytics_revenue':
-        await analytics_show_revenue(update, processed_records)
+        message_text = analytics_show_revenue(processed_records)
     elif command == 'analytics_appointments':
-        await analytics_show_appointments(update, processed_records)
+        message_text = analytics_show_appointments(processed_records)
     elif command == 'analytics_procedures':
-        await analytics_show_procedures(update, processed_records)
+        message_text = analytics_show_procedures(processed_records)
     elif command == 'analytics_patients':
-        await analytics_show_patients(update, processed_records)
+        message_text = analytics_show_patients(processed_records)
 
-    # After showing the report, show the analytics menu again
-    if query.message:
-        await query.message.reply_text("Use /menu para voltar ao menu principal ou escolha outra análise abaixo.")
-    await analytics_start(update, context)
-    return ANALYTICS_MENU
+    await query.edit_message_text(text=message_text, parse_mode='Markdown')
+
+    # After showing the report, send the final message and end.
+    await send_final_message(update)
+    return ConversationHandler.END
 
 
-async def analytics_show_revenue(update: Update, records: list[dict]):
+def analytics_show_revenue(records: list[dict]) -> str:
     """Calculates and shows total revenue per month and grand total."""
     monthly_revenue = defaultdict(float)
     for record in records:
@@ -295,8 +303,7 @@ async def analytics_show_revenue(update: Update, records: list[dict]):
         monthly_revenue[month_key] += record['parsed_price']
 
     if not monthly_revenue:
-        await update.effective_message.reply_text("Nenhum dado de faturamento encontrado.")
-        return
+        return "Nenhum dado de faturamento encontrado."
 
     message = "💰 *Faturamento Mensal*\n\n"
     total_revenue = 0.0
@@ -309,10 +316,10 @@ async def analytics_show_revenue(update: Update, records: list[dict]):
         message += f"*{month}:* R$ {revenue:.2f}\n".replace('.', ',')
 
     message += f"\n*Total Geral:* R$ {total_revenue:.2f}".replace('.', ',')
-    await update.effective_message.reply_text(message, parse_mode='Markdown')
+    return message
 
 
-async def analytics_show_appointments(update: Update, records: list[dict]):
+def analytics_show_appointments(records: list[dict]) -> str:
     """Calculates and shows total appointments per month."""
     monthly_appointments = defaultdict(int)
     for record in records:
@@ -320,8 +327,7 @@ async def analytics_show_appointments(update: Update, records: list[dict]):
         monthly_appointments[month_key] += 1
 
     if not monthly_appointments:
-        await update.effective_message.reply_text("Nenhum atendimento encontrado.")
-        return
+        return "Nenhum atendimento encontrado."
 
     message = "📅 *Atendimentos por Mês*\n\n"
     sorted_months = sorted(monthly_appointments.keys(), key=lambda m: datetime.strptime(m, "%m/%Y"))
@@ -330,10 +336,10 @@ async def analytics_show_appointments(update: Update, records: list[dict]):
         count = monthly_appointments[month]
         message += f"*{month}:* {count} atendimentos\n"
 
-    await update.effective_message.reply_text(message, parse_mode='Markdown')
+    return message
 
 
-async def analytics_show_procedures(update: Update, records: list[dict]):
+def analytics_show_procedures(records: list[dict]) -> str:
     """Calculates and shows procedure counts per month."""
     monthly_procedures = defaultdict(lambda: defaultdict(int))
     for record in records:
@@ -345,8 +351,7 @@ async def analytics_show_procedures(update: Update, records: list[dict]):
                 monthly_procedures[month_key][slug] += 1
 
     if not monthly_procedures:
-        await update.effective_message.reply_text("Nenhum procedimento encontrado.")
-        return
+        return "Nenhum procedimento encontrado."
 
     message = "⭐ *Procedimentos Populares por Mês*\n"
     sorted_months = sorted(monthly_procedures.keys(), key=lambda m: datetime.strptime(m, "%m/%Y"))
@@ -362,10 +367,10 @@ async def analytics_show_procedures(update: Update, records: list[dict]):
             proc_name = PROCEDURE_DESCRIPTIONS.get(slug, slug.upper())
             message += f"  - {proc_name}: {count}\n"
 
-    await update.effective_message.reply_text(message, parse_mode='Markdown')
+    return message
 
 
-async def analytics_show_patients(update: Update, records: list[dict]):
+def analytics_show_patients(records: list[dict]) -> str:
     """Calculates and shows patient appointment counts per month."""
     monthly_patients = defaultdict(lambda: defaultdict(int))
     for record in records:
@@ -374,8 +379,7 @@ async def analytics_show_patients(update: Update, records: list[dict]):
         monthly_patients[month_key][patient_name] += 1
 
     if not monthly_patients:
-        await update.effective_message.reply_text("Nenhum paciente encontrado.")
-        return
+        return "Nenhum paciente encontrado."
 
     message = "👤 *Ranking de Pacientes por Mês*\n"
     sorted_months = sorted(monthly_patients.keys(), key=lambda m: datetime.strptime(m, "%m/%Y"))
@@ -387,7 +391,7 @@ async def analytics_show_patients(update: Update, records: list[dict]):
         for name, count in sorted_patients:
             message += f"  - {name}: {count}\n"
 
-    await update.effective_message.reply_text(message, parse_mode='Markdown')
+    return message
 
 
 # --- REGISTRAR Conversation ---
@@ -412,7 +416,7 @@ async def registrar_date_selection(update: Update, context: CallbackContext) -> 
     choice = query.data
 
     if choice == "reg_today":
-        context.user_data['date'] = datetime.now().date()
+        context.user_data['date'] = get_brazil_datetime_now().date()
         await query.edit_message_text("👤 Por favor, digite o nome do(a) paciente.")
         return REG_AWAITING_PATIENT
     elif choice == "reg_other_date":
@@ -425,7 +429,7 @@ async def registrar_receive_custom_date(update: Update, context: CallbackContext
     """Receives a custom date from the user and asks for the patient's name."""
     date_str = update.message.text
     try:
-        current_year = datetime.now().year
+        current_year = get_brazil_datetime_now().year
         target_date = datetime.strptime(f"{date_str}/{current_year}", "%d/%m/%Y").date()
         context.user_data['date'] = target_date
         await update.message.reply_text("👤 Por favor, digite o nome do(a) paciente.")
@@ -538,6 +542,9 @@ async def save_record_and_summarize(update: Update, context: CallbackContext) ->
         return ConversationHandler.END
 
     try:
+        # First, edit the original message to give feedback.
+        await query.edit_message_text("Salvando registro...")
+
         user_data = context.user_data
         date_obj = user_data['date']
         patient = user_data['patient'].upper()
@@ -554,21 +561,27 @@ async def save_record_and_summarize(update: Update, context: CallbackContext) ->
         sheet.append_row(row)
 
         summary_text = (
-            f"✅ *Atendimento Salvo com Sucesso!*\n\n"
+            f"✅ *Atendimento salvo com sucesso!*\n\n"
             f"📅 *Data:* {date_obj.strftime('%d/%m/%Y')}\n"
             f"👤 *Paciente:* {patient.title()}\n"
             f"📋 *Procedimentos:* {', '.join(procedure_names)}\n"
             f"💰 *Valor:* R$ {price:.2f}".replace('.', ',')
         )
-        await query.edit_message_text(summary_text, parse_mode='Markdown')
+        # Send the summary as a new message
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=summary_text,
+            parse_mode='Markdown'
+        )
 
-        # Ask to add another
+        # Ask to add another in a new message
         keyboard = [
             [InlineKeyboardButton("Sim, para a mesma data", callback_data="reg_another_yes")],
-            [InlineKeyboardButton("Não, voltar ao menu", callback_data="reg_another_no")],
+            [InlineKeyboardButton("Não, finalizar", callback_data="reg_another_no")],
         ]
-        await query.message.reply_text(
-            "Deseja registrar outro atendimento?",
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Deseja registrar outro atendimento?",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return REG_CONFIRMING_MORE
@@ -623,7 +636,7 @@ async def deletar_date_selection(update: Update, context: CallbackContext) -> in
     choice = query.data
 
     if choice == "del_today":
-        selected_date = datetime.now().date()
+        selected_date = get_brazil_datetime_now().date()
         return await list_records_for_deletion(update, context, selected_date)
     elif choice == "del_other_date":
         await query.edit_message_text("📅 Por favor, digite a data no formato `DD/MM`.")
@@ -631,7 +644,7 @@ async def deletar_date_selection(update: Update, context: CallbackContext) -> in
     return ConversationHandler.END
 
 
-def get_records_with_row_numbers(sheet, target_date: datetime.date) -> list[dict]:
+def get_records_with_row_numbers(sheet, target_date) -> List[Dict]:
     """Fetches records for a date and includes their row number."""
     all_values = sheet.get_all_values()
     header = all_values[0]
@@ -650,7 +663,7 @@ def get_records_with_row_numbers(sheet, target_date: datetime.date) -> list[dict
     return records_with_rows
 
 
-async def list_records_for_deletion(update: Update, context: CallbackContext, target_date: datetime.date) -> int:
+async def list_records_for_deletion(update: Update, context: CallbackContext, target_date) -> int:
     """Lists records for a given date as selectable buttons for deletion."""
     sheet = get_sheet()
     if not sheet:
@@ -722,7 +735,7 @@ async def deletar_receive_date(update: Update, context: CallbackContext) -> int:
     """Receives a custom date and lists records for deletion."""
     date_str = update.message.text
     try:
-        current_year = datetime.now().year
+        current_year = get_brazil_datetime_now().year
         target_date = datetime.strptime(f"{date_str}/{current_year}", "%d/%m/%Y").date()
         return await list_records_for_deletion(update, context, target_date)
     except ValueError:
@@ -835,7 +848,7 @@ async def listar_date_selection(update: Update, context: CallbackContext) -> int
     choice = query.data
 
     if choice == "list_today":
-        selected_date = datetime.now().date()
+        selected_date = get_brazil_datetime_now().date()
         await list_records_for_date(update, context, selected_date)
         return ConversationHandler.END
     elif choice == "list_other_date":
@@ -848,7 +861,7 @@ async def listar_receive_date(update: Update, context: CallbackContext) -> int:
     """Receives the date and lists the records."""
     date_str = update.message.text
     try:
-        current_year = datetime.now().year
+        current_year = get_brazil_datetime_now().year
         target_date = datetime.strptime(f"{date_str}/{current_year}", "%d/%m/%Y").date()
         await list_records_for_date(update, context, target_date)
         return ConversationHandler.END
@@ -857,11 +870,15 @@ async def listar_receive_date(update: Update, context: CallbackContext) -> int:
         return LISTAR_AWAITING_DATE
 
 
-async def list_records_for_date(update: Update, context: CallbackContext, target_date: datetime.date) -> int:
+async def list_records_for_date(update: Update, context: CallbackContext, target_date) -> int:
     """Fetches and displays records for a specific date."""
     sheet = get_sheet()
     if not sheet:
-        await update.effective_message.reply_text("⚠️ Erro de configuração: Não foi possível conectar à planilha. Operação cancelada.")
+        error_message = "⚠️ Erro de configuração: Não foi possível conectar à planilha. Operação cancelada."
+        if update.callback_query:
+            await update.callback_query.edit_message_text(error_message)
+        else:
+            await update.effective_message.reply_text(error_message)
         return ConversationHandler.END
 
     try:
@@ -869,7 +886,11 @@ async def list_records_for_date(update: Update, context: CallbackContext, target
         date_str = target_date.strftime("%d/%m/%Y")
 
         if not day_records:
-            await update.effective_message.reply_text(f"ℹ️ Nenhum atendimento encontrado para o dia {date_str}.")
+            message = f"ℹ️ Nenhum atendimento encontrado para o dia {date_str}."
+            if update.callback_query:
+                await update.callback_query.edit_message_text(message)
+            else:
+                await update.effective_message.reply_text(message)
             await send_final_message(update)
             return ConversationHandler.END
 
@@ -888,7 +909,12 @@ async def list_records_for_date(update: Update, context: CallbackContext, target
             )
 
         message += f"💰 *Total do dia:* R$ {total_day_price:.2f}".replace('.', ',')
-        await update.effective_message.reply_text(message, parse_mode='Markdown')
+
+        if update.callback_query:
+            await update.callback_query.edit_message_text(message, parse_mode='Markdown')
+        else:
+            await update.effective_message.reply_text(message, parse_mode='Markdown')
+
         await send_final_message(update)
         return ConversationHandler.END
 
@@ -950,13 +976,16 @@ async def calcular_receive_range(update: Update, context: CallbackContext) -> in
     return ConversationHandler.END
 
 
-async def process_sum_calculation(update: Update, context: ContextTypes.DEFAULT_TYPE, date_input: str | None) -> int:
+async def process_sum_calculation(update: Update, context: CallbackContext, date_input: Optional[str]) -> int:
     """Fetches data and calculates the sum for the given mode and date."""
     mode = context.user_data.get('calc_mode')
 
     date_range_data = get_date_range_for_sum(mode, date_input)
     if not date_range_data:
-        await update.effective_message.reply_text("⚠️ Data em formato inválido. Tente novamente ou /cancelar.")
+        if update.callback_query:
+            await update.callback_query.edit_message_text("⚠️ Data em formato inválido. Tente novamente ou /cancelar.")
+        else:
+            await update.effective_message.reply_text("⚠️ Data em formato inválido. Tente novamente ou /cancelar.")
         # Determine which state to return to based on the mode
         if mode == 'periodo':
             return CALC_AWAITING_RANGE
@@ -967,7 +996,10 @@ async def process_sum_calculation(update: Update, context: ContextTypes.DEFAULT_
 
     sheet = get_sheet()
     if not sheet:
-        await update.effective_message.reply_text("⚠️ Erro de configuração: Não foi possível conectar à planilha.")
+        if update.callback_query:
+            await update.callback_query.edit_message_text("⚠️ Erro de configuração: Não foi possível conectar à planilha.")
+        else:
+            await update.effective_message.reply_text("⚠️ Erro de configuração: Não foi possível conectar à planilha.")
         return ConversationHandler.END
 
     try:
@@ -975,19 +1007,19 @@ async def process_sum_calculation(update: Update, context: ContextTypes.DEFAULT_
         count = len(records_in_range)
 
         if count == 0:
-            await update.effective_message.reply_text(f"ℹ️ Nenhum atendimento encontrado para {period_str}.")
+            if update.callback_query:
+                await update.callback_query.edit_message_text(f"ℹ️ Nenhum atendimento encontrado para {period_str}.")
+            else:
+                await update.effective_message.reply_text(f"ℹ️ Nenhum atendimento encontrado para {period_str}.")
         else:
             total = sum(record['Price'] for record in records_in_range)
             total_str = f"{total:.2f}".replace('.', ',')
-
             daily_summary = defaultdict(lambda: {'total': 0.0, 'count': 0})
             for record in records_in_range:
                 record_date_obj = datetime.strptime(record['Date'], "%d/%m/%Y").date()
                 daily_summary[record_date_obj]['total'] += record['Price']
                 daily_summary[record_date_obj]['count'] += 1
-
             sorted_daily_summary = sorted(daily_summary.items())
-
             daily_breakdown = []
             for date_obj, summary_data in sorted_daily_summary:
                 day_total_str = f"{summary_data['total']:.2f}".replace('.', ',')
@@ -1000,11 +1032,16 @@ async def process_sum_calculation(update: Update, context: ContextTypes.DEFAULT_
             if mode != 'dia':
                 message += f"\n\n📊 *Total de {count} atendimentos para {period_str}: R$ {total_str}*"
 
-            await update.effective_message.reply_text(message, parse_mode='Markdown')
-
+            if update.callback_query:
+                await update.callback_query.edit_message_text(message, parse_mode='Markdown')
+            else:
+                await update.effective_message.reply_text(message, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Error in process_sum_calculation: {e}")
-        await update.effective_message.reply_text(f"⚠️ Erro ao calcular o total: {e}")
+        if update.callback_query:
+            await update.callback_query.edit_message_text(f"⚠️ Erro ao calcular o total: {e}")
+        else:
+            await update.effective_message.reply_text(f"⚠️ Erro ao calcular o total: {e}")
 
     await send_final_message(update)
     context.user_data.clear()
@@ -1013,10 +1050,13 @@ async def process_sum_calculation(update: Update, context: ContextTypes.DEFAULT_
 
 async def cancel_command(update: Update, context: CallbackContext) -> int:
     """Cancels and ends the current conversation, returning to the main menu."""
-    await update.message.reply_text("Operação cancelada. Voltando ao menu principal.")
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("Operação cancelada. Voltando ao menu principal.")
+    else:
+        await update.message.reply_text("Operação cancelada. Voltando ao menu principal.")
+
     # We need to call menu_command to display the menu again.
-    # Since cancel is a CommandHandler, it doesn't have a callback_query.
-    # We pass a modified update object.
     await menu_command(update, context)
     return ConversationHandler.END
 
