@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -8,6 +7,20 @@ from telegram.ext import (
 )
 
 from constants import (
+    DATE_FORMAT,
+    MSG_ERROR_INVALID_DATE_FORMAT_DDMM,
+    MSG_OPERATION_CANCELLED,
+    MSG_PROMPT_DATE_DDMM,
+    MSG_PROMPT_PATIENT_NAME,
+    MSG_REG_ASK_ANOTHER,
+    MSG_REG_ASK_DATE,
+    MSG_REG_FINISHED,
+    MSG_REG_NO_PROCEDURE_SELECTED,
+    MSG_REG_PATIENT_NAME_EMPTY,
+    MSG_REG_SAVING,
+    MSG_REG_SELECT_PRICE,
+    MSG_REG_SELECT_PROCEDURES,
+    MSG_REG_SUCCESS,
     PROCEDURE_DESCRIPTIONS,
     REG_AWAITING_DATE,
     REG_AWAITING_PATIENT,
@@ -18,7 +31,14 @@ from constants import (
 )
 from g_sheets import get_sheet
 from handlers.commons import list_records_for_date, menu_command
-from utils import get_brazil_datetime_now
+from utils import (
+    format_currency,
+    get_brazil_datetime_now,
+    handle_generic_error,
+    handle_sheet_error,
+    parse_ddmm_date,
+    reply_or_edit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +53,7 @@ async def registrar_start(update: Update, context: CallbackContext) -> int:
         [InlineKeyboardButton("🔙 Voltar ao Menu", callback_data="menu_back")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    message = "📅 Para qual data você deseja registrar o novo atendimento?"
-    await update.callback_query.edit_message_text(text=message, reply_markup=reply_markup)
+    await reply_or_edit(update, text=MSG_REG_ASK_DATE, reply_markup=reply_markup)
     return REG_AWAITING_DATE
 
 
@@ -46,10 +65,10 @@ async def registrar_date_selection(update: Update, context: CallbackContext) -> 
 
     if choice == "reg_today":
         context.user_data["date"] = get_brazil_datetime_now().date()
-        await query.edit_message_text("👤 Por favor, digite o nome do(a) paciente.")
+        await reply_or_edit(update, MSG_PROMPT_PATIENT_NAME)
         return REG_AWAITING_PATIENT
     if choice == "reg_other_date":
-        await query.edit_message_text("📅 Por favor, digite a data no formato `DD/MM`.")
+        await reply_or_edit(update, MSG_PROMPT_DATE_DDMM)
         return REG_AWAITING_DATE  # Wait for user to type date
     return ConversationHandler.END
 
@@ -57,36 +76,28 @@ async def registrar_date_selection(update: Update, context: CallbackContext) -> 
 async def registrar_receive_custom_date(update: Update, context: CallbackContext) -> int:
     """Receives a custom date from the user and asks for the patient's name."""
     date_str = update.message.text
-    try:
-        current_year = get_brazil_datetime_now().year
-        target_date = datetime.strptime(f"{date_str}/{current_year}", "%d/%m/%Y").date()
-        context.user_data["date"] = target_date
-        await update.message.reply_text("👤 Por favor, digite o nome do(a) paciente.")
-        return REG_AWAITING_PATIENT
-    except ValueError:
-        await update.message.reply_text(
-            "⚠️ Data inválida. Use o formato DD/MM. Tente novamente ou use /cancelar."
-        )
+    target_date = parse_ddmm_date(date_str)
+    if not target_date:
+        await reply_or_edit(update, MSG_ERROR_INVALID_DATE_FORMAT_DDMM)
         return REG_AWAITING_DATE
+
+    context.user_data["date"] = target_date
+    await reply_or_edit(update, MSG_PROMPT_PATIENT_NAME)
+    return REG_AWAITING_PATIENT
 
 
 async def registrar_receive_patient(update: Update, context: CallbackContext) -> int:
     """Receives the patient's name and shows the procedure selection."""
     patient_name = update.message.text.strip()
     if not patient_name:
-        await update.message.reply_text(
-            "⚠️ Nome do paciente não pode ser vazio. Por favor, tente novamente."
-        )
+        await reply_or_edit(update, MSG_REG_PATIENT_NAME_EMPTY)
         return REG_AWAITING_PATIENT
 
     context.user_data["patient"] = patient_name
     context.user_data["selected_procedures"] = set()
 
     reply_markup = registrar_build_procedures_keyboard(set())
-    await update.message.reply_text(
-        "📋 Selecione um ou mais procedimentos. Clique em 'Continuar' quando terminar.",
-        reply_markup=reply_markup,
-    )
+    await reply_or_edit(update, MSG_REG_SELECT_PROCEDURES, reply_markup=reply_markup)
     return REG_SELECTING_PROCEDURES
 
 
@@ -97,7 +108,7 @@ async def registrar_procedure_selection(update: Update, context: CallbackContext
     callback_data = query.data
 
     if callback_data == "cancel":
-        await query.edit_message_text("Operação cancelada.")
+        await reply_or_edit(update, MSG_OPERATION_CANCELLED)
         return await menu_command(update, context)
 
     selected_procedures = context.user_data.get("selected_procedures", set())
@@ -105,22 +116,21 @@ async def registrar_procedure_selection(update: Update, context: CallbackContext
     if callback_data == "proc_done":
         if not selected_procedures:
             await context.bot.answer_callback_query(
-                query.id, "⚠️ Você deve selecionar pelo menos um procedimento.", show_alert=True
+                query.id, MSG_REG_NO_PROCEDURE_SELECTED, show_alert=True
             )
             return REG_SELECTING_PROCEDURES
 
         # Build price keyboard
         price_keyboard = [
             [
-                InlineKeyboardButton(
-                    f"R$ {price:.2f}".replace(".", ","), callback_data=f"price_{price}"
-                )
+                InlineKeyboardButton(format_currency(price), callback_data=f"price_{price}")
                 for price in VALID_PRICES
             ],
             [InlineKeyboardButton("🔙 Voltar", callback_data="price_back")],
         ]
-        await query.edit_message_text(
-            "💰 Selecione o valor do atendimento:",
+        await reply_or_edit(
+            update,
+            MSG_REG_SELECT_PRICE,
             reply_markup=InlineKeyboardMarkup(price_keyboard),
         )
         return REG_SELECTING_PRICE
@@ -134,10 +144,7 @@ async def registrar_procedure_selection(update: Update, context: CallbackContext
 
     context.user_data["selected_procedures"] = selected_procedures
     reply_markup = registrar_build_procedures_keyboard(selected_procedures)
-    await query.edit_message_text(
-        "📋 Selecione um ou mais procedimentos. Clique em 'Continuar' quando terminar.",
-        reply_markup=reply_markup,
-    )
+    await reply_or_edit(update, MSG_REG_SELECT_PROCEDURES, reply_markup=reply_markup)
     return REG_SELECTING_PROCEDURES
 
 
@@ -151,10 +158,7 @@ async def registrar_price_selection(update: Update, context: CallbackContext) ->
         reply_markup = registrar_build_procedures_keyboard(
             context.user_data.get("selected_procedures", set())
         )
-        await query.edit_message_text(
-            "📋 Selecione um ou mais procedimentos. Clique em 'Continuar' quando terminar.",
-            reply_markup=reply_markup,
-        )
+        await reply_or_edit(update, MSG_REG_SELECT_PROCEDURES, reply_markup=reply_markup)
         return REG_SELECTING_PROCEDURES
 
     price = int(callback_data.replace("price_", ""))
@@ -169,14 +173,12 @@ async def save_record_and_summarize(update: Update, context: CallbackContext) ->
     query = update.callback_query
     sheet = get_sheet()
     if not sheet:
-        await query.edit_message_text(
-            "⚠️ Erro de configuração: Não foi possível conectar à planilha."
-        )
+        await handle_sheet_error(update)
         return ConversationHandler.END
 
     try:
         # First, edit the original message to give feedback.
-        await query.edit_message_text("Salvando registro...")
+        await reply_or_edit(update, MSG_REG_SAVING)
 
         user_data = context.user_data
         date_obj = user_data["date"]
@@ -185,15 +187,14 @@ async def save_record_and_summarize(update: Update, context: CallbackContext) ->
         procedure_names = [PROCEDURE_DESCRIPTIONS[slug] for slug in procedure_slugs]
         price = user_data["price"]
 
-        row = [date_obj.strftime("%d/%m/%Y"), patient, ", ".join(procedure_slugs).upper(), price]
+        row = [date_obj.strftime(DATE_FORMAT), patient, ", ".join(procedure_slugs).upper(), price]
         sheet.append_row(row)
 
-        summary_text = (
-            f"✅ *Atendimento salvo com sucesso!*\n\n"
-            f"📅 *Data:* {date_obj.strftime('%d/%m/%Y')}\n"
-            f"👤 *Paciente:* {patient.title()}\n"
-            f"📋 *Procedimentos:* {', '.join(procedure_names)}\n"
-            f"💰 *Valor:* R$ {price:.2f}".replace(".", ",")
+        summary_text = MSG_REG_SUCCESS.format(
+            date=date_obj.strftime(DATE_FORMAT),
+            patient=patient.title(),
+            procedures=", ".join(procedure_names),
+            price=format_currency(price),
         )
         # Send the summary as a new message
         await context.bot.send_message(
@@ -207,15 +208,13 @@ async def save_record_and_summarize(update: Update, context: CallbackContext) ->
         ]
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="Deseja registrar outro atendimento?",
+            text=MSG_REG_ASK_ANOTHER,
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return REG_CONFIRMING_MORE
 
     except Exception as e:
-        logger.error(f"Failed to save record: {e}")
-        await query.edit_message_text(f"⚠️ Ocorreu um erro ao salvar o registro: {e}")
-        return ConversationHandler.END
+        return await handle_generic_error(update, e, context)
 
 
 async def registrar_confirm_more(update: Update, context: CallbackContext) -> int:
@@ -229,11 +228,11 @@ async def registrar_confirm_more(update: Update, context: CallbackContext) -> in
         date = context.user_data.get("date")
         context.user_data.clear()
         context.user_data["date"] = date
-        await query.edit_message_text("👤 Por favor, digite o nome do(a) próximo(a) paciente.")
+        await reply_or_edit(update, MSG_PROMPT_PATIENT_NAME)
         return REG_AWAITING_PATIENT
     # 'reg_another_no'
     date_obj = context.user_data.get("date")
-    await query.edit_message_text("Ok, operação finalizada.")
+    await reply_or_edit(update, MSG_REG_FINISHED)
     context.user_data.clear()
     # Show summary for the day
     await list_records_for_date(update, context, date_obj)

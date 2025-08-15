@@ -6,9 +6,23 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-from constants import MENU, PROCEDURE_DESCRIPTIONS
+from constants import (
+    DATE_FORMAT,
+    MENU,
+    MSG_ERROR_GENERIC,
+    MSG_ERROR_NO_RECORDS_FOUND_FOR_DATE,
+    MSG_ERROR_SHEET_CONNECTION,
+    MSG_GREETING,
+    MSG_MAIN_MENU,
+)
 from g_sheets import get_sheet
-from utils import get_records_in_range, send_final_message, slugify
+from utils import (
+    format_currency,
+    get_all_parsed_records,
+    get_info_from_record,
+    get_records_in_range,
+    send_final_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +47,10 @@ async def menu_command(update: Update, context: CallbackContext) -> int:
     # If coming from a canceled operation or another menu, edit the message.
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(
-            "Menu Principal. O que você gostaria de fazer?", reply_markup=reply_markup
-        )
+        await update.callback_query.edit_message_text(MSG_MAIN_MENU, reply_markup=reply_markup)
     else:
         await update.message.reply_text(
-            "👋 Olá! Sou seu assistente de agendamentos. O que você gostaria de fazer?",
+            MSG_GREETING,
             reply_markup=reply_markup,
         )
     return MENU
@@ -48,9 +60,7 @@ async def list_records_for_date(update: Update, context: CallbackContext, target
     """Fetches and displays records for a specific date."""
     sheet = get_sheet()
     if not sheet:
-        error_message = (
-            "⚠️ Erro de configuração: Não foi possível conectar à planilha. Operação cancelada."
-        )
+        error_message = MSG_ERROR_SHEET_CONNECTION + " Operação cancelada."
         if update.callback_query:
             await update.callback_query.edit_message_text(error_message)
         else:
@@ -58,11 +68,12 @@ async def list_records_for_date(update: Update, context: CallbackContext, target
         return ConversationHandler.END
 
     try:
-        day_records = get_records_in_range(sheet, target_date, target_date)
-        date_str = target_date.strftime("%d/%m/%Y")
+        all_records = get_all_parsed_records(sheet)
+        day_records = get_records_in_range(all_records, target_date, target_date)
+        date_str = target_date.strftime(DATE_FORMAT)
 
         if not day_records:
-            message = f"ℹ️ Nenhum atendimento encontrado para o dia {date_str}."
+            message = MSG_ERROR_NO_RECORDS_FOUND_FOR_DATE.format(date_str)
             if update.callback_query:
                 await update.callback_query.edit_message_text(message)
             else:
@@ -70,23 +81,20 @@ async def list_records_for_date(update: Update, context: CallbackContext, target
             await send_final_message(update)
             return ConversationHandler.END
 
-        message = f"📋 *Atendimentos de {date_str}*\n\n"
+        message_parts = [f"📋 *Atendimentos de {date_str}*\n"]
         total_day_price = 0.0
+
         for record in day_records:
-            procedure_slugs = [slugify(p.strip()) for p in record.get("Procedures", "").split(",")]
-            procedure_names = [
-                PROCEDURE_DESCRIPTIONS.get(slug, slug.upper()) for slug in procedure_slugs
-            ]
-            patient_name = record.get("Patient", "").title()
-            price = record.get("Price", 0.0)
-            total_day_price += price
-            message += (
-                f"👤 *Paciente:* {patient_name}\n"
-                f"   *Procedimentos:* {', '.join(procedure_names)}\n"
-                f"   *Valor:* R$ {price:.2f}\n\n".replace(".", ",")
+            patient, procs_display, price_str = get_info_from_record(record)
+            total_day_price += record["parsed_price"]
+            message_parts.append(
+                f"👤 *Paciente:* {patient}\n"
+                f"   *Procedimentos:* {procs_display}\n"
+                f"   *Valor:* {price_str}\n"
             )
 
-        message += f"💰 *Total do dia:* R$ {total_day_price:.2f}".replace(".", ",")
+        message_parts.append(f"💰 *Total do dia:* {format_currency(total_day_price)}")
+        message = "\n".join(message_parts)
 
         if update.callback_query:
             await update.callback_query.edit_message_text(message, parse_mode="Markdown")
@@ -98,5 +106,5 @@ async def list_records_for_date(update: Update, context: CallbackContext, target
 
     except Exception as e:
         logger.error(f"Error listing records: {e}")
-        await update.effective_message.reply_text(f"⚠️ Erro ao buscar registros: {e}")
+        await update.effective_message.reply_text(MSG_ERROR_GENERIC.format(e))
         return ConversationHandler.END

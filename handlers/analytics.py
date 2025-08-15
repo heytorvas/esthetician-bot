@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -7,9 +7,25 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-from constants import ANALYTICS_MENU, PROCEDURE_DESCRIPTIONS
+from constants import (
+    ANALYTICS_MENU,
+    MSG_ANALYTICS_MENU,
+    MSG_ANALYTICS_NO_APPOINTMENTS,
+    MSG_ANALYTICS_NO_PATIENTS,
+    MSG_ANALYTICS_NO_PROCEDURES,
+    MSG_ANALYTICS_NO_REVENUE,
+    MSG_ANALYTICS_UNKNOWN_COMMAND,
+    MSG_ERROR_NO_DATA_FOR_ANALYTICS,
+    PROCEDURE_DESCRIPTIONS,
+)
 from g_sheets import get_sheet
-from utils import send_final_message, slugify
+from utils import (
+    format_currency,
+    get_all_parsed_records,
+    handle_sheet_error,
+    reply_or_edit,
+    send_final_message,
+)
 
 
 # --- Analytics ---
@@ -23,9 +39,8 @@ async def analytics_start(update: Update, context: CallbackContext) -> int:
         [InlineKeyboardButton("🔙 Voltar ao Menu", callback_data="menu_back")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    message = "📈 *Menu de Análises*\n\nEscolha qual relatório você deseja ver:"
-    await update.callback_query.edit_message_text(
-        text=message, reply_markup=reply_markup, parse_mode="Markdown"
+    await reply_or_edit(
+        update, text=MSG_ANALYTICS_MENU, reply_markup=reply_markup, parse_mode="Markdown"
     )
     return ANALYTICS_MENU
 
@@ -38,82 +53,83 @@ async def analytics_router(update: Update, context: CallbackContext) -> int:
 
     sheet = get_sheet()
     if not sheet:
-        await query.edit_message_text(
-            "⚠️ Erro de configuração: Não foi possível conectar à planilha."
-        )
+        await handle_sheet_error(update)
         return ConversationHandler.END
 
-    all_records = sheet.get_all_records()
+    all_records = get_all_parsed_records(sheet)
     if not all_records:
-        await query.edit_message_text("ℹ️ Não há dados suficientes para gerar análises.")
+        await reply_or_edit(update, MSG_ERROR_NO_DATA_FOR_ANALYTICS)
         return ConversationHandler.END
 
-    # Pre-process records to parse dates and prices once
-    processed_records = []
-    for record in all_records:
-        try:
-            record["parsed_date"] = datetime.strptime(record.get("Date", ""), "%d/%m/%Y").date()
-            record["parsed_price"] = float(str(record.get("Price", "0")).replace(",", "."))
-            processed_records.append(record)
-        except (ValueError, TypeError):
-            continue  # Skip malformed records
-
-    message_text = "Comando não reconhecido."
+    message_text = MSG_ANALYTICS_UNKNOWN_COMMAND
     if command == "analytics_revenue":
-        message_text = analytics_show_revenue(processed_records)
+        message_text = analytics_show_revenue(all_records)
     elif command == "analytics_appointments":
-        message_text = analytics_show_appointments(processed_records)
+        message_text = analytics_show_appointments(all_records)
     elif command == "analytics_procedures":
-        message_text = analytics_show_procedures(processed_records)
+        message_text = analytics_show_procedures(all_records)
     elif command == "analytics_patients":
-        message_text = analytics_show_patients(processed_records)
+        message_text = analytics_show_patients(all_records)
 
-    await query.edit_message_text(text=message_text, parse_mode="Markdown")
+    await reply_or_edit(update, text=message_text, parse_mode="Markdown")
 
     # After showing the report, send the final message and end.
     await send_final_message(update)
     return ConversationHandler.END
 
 
+def _group_records_by_month(records: list[dict]) -> dict[str, list[dict]]:
+    """Groups a list of records into a dictionary keyed by month ('MM/YYYY')."""
+    monthly_groups = defaultdict(list)
+    for record in records:
+        month_key = _get_custom_month(record["parsed_date"])
+        monthly_groups[month_key].append(record)
+    return monthly_groups
+
+
+def _get_custom_month(record_date: date) -> str:
+    if record_date.day < 7:
+        if record_date.month == 1:
+            mo, yr = 12, record_date.year - 1
+        else:
+            mo, yr = record_date.month - 1, record_date.year
+    else:
+        mo, yr = record_date.month, record_date.year
+    return f"{mo}/{yr}"
+
+
 def analytics_show_revenue(records: list[dict]) -> str:
     """Calculates and shows total revenue per month and grand total."""
-    monthly_revenue = defaultdict(float)
-    for record in records:
-        month_key = record["parsed_date"].strftime("%m/%Y")
-        monthly_revenue[month_key] += record["parsed_price"]
-
-    if not monthly_revenue:
-        return "Nenhum dado de faturamento encontrado."
+    monthly_groups = _group_records_by_month(records)
+    if not monthly_groups:
+        return MSG_ANALYTICS_NO_REVENUE
 
     message = "💰 *Faturamento Mensal*\n\n"
     total_revenue = 0.0
     # Sort by month/year
-    sorted_months = sorted(monthly_revenue.keys(), key=lambda m: datetime.strptime(m, "%m/%Y"))
+    sorted_months = sorted(monthly_groups.keys(), key=lambda m: datetime.strptime(m, "%m/%Y"))
 
     for month in sorted_months:
-        revenue = monthly_revenue[month]
-        total_revenue += revenue
-        message += f"*{month}:* R$ {revenue:.2f}\n".replace(".", ",")
+        monthly_records = monthly_groups[month]
+        month_revenue = sum(record.get("parsed_price", 0.0) for record in monthly_records)
+        total_revenue += month_revenue
+        message += f"*{month}:* {format_currency(month_revenue)}\n"
 
-    message += f"\n*Total Geral:* R$ {total_revenue:.2f}".replace(".", ",")
+    message += f"\n*Total Geral:* {format_currency(total_revenue)}"
     return message
 
 
 def analytics_show_appointments(records: list[dict]) -> str:
     """Calculates and shows total appointments per month."""
-    monthly_appointments = defaultdict(int)
-    for record in records:
-        month_key = record["parsed_date"].strftime("%m/%Y")
-        monthly_appointments[month_key] += 1
-
-    if not monthly_appointments:
-        return "Nenhum atendimento encontrado."
+    monthly_groups = _group_records_by_month(records)
+    if not monthly_groups:
+        return MSG_ANALYTICS_NO_APPOINTMENTS
 
     message = "📅 *Atendimentos por Mês*\n\n"
-    sorted_months = sorted(monthly_appointments.keys(), key=lambda m: datetime.strptime(m, "%m/%Y"))
+    sorted_months = sorted(monthly_groups.keys(), key=lambda m: datetime.strptime(m, "%m/%Y"))
 
     for month in sorted_months:
-        count = monthly_appointments[month]
+        count = len(monthly_groups[month])
         message += f"*{month}:* {count} atendimentos\n"
 
     return message
@@ -123,15 +139,15 @@ def analytics_show_procedures(records: list[dict]) -> str:
     """Calculates and shows procedure counts per month."""
     monthly_procedures = defaultdict(lambda: defaultdict(int))
     for record in records:
-        month_key = record["parsed_date"].strftime("%m/%Y")
+        month_key = _get_custom_month(record["parsed_date"])
         procedures = record.get("Procedures", "").split(",")
         for proc in procedures:
-            slug = slugify(proc.strip())
+            slug = proc.strip().lower()
             if slug in PROCEDURE_DESCRIPTIONS:
                 monthly_procedures[month_key][slug] += 1
 
     if not monthly_procedures:
-        return "Nenhum procedimento encontrado."
+        return MSG_ANALYTICS_NO_PROCEDURES
 
     message = "⭐ *Procedimentos Populares por Mês*\n"
     sorted_months = sorted(monthly_procedures.keys(), key=lambda m: datetime.strptime(m, "%m/%Y"))
@@ -154,12 +170,12 @@ def analytics_show_patients(records: list[dict]) -> str:
     """Calculates and shows patient appointment counts per month."""
     monthly_patients = defaultdict(lambda: defaultdict(int))
     for record in records:
-        month_key = record["parsed_date"].strftime("%m/%Y")
+        month_key = _get_custom_month(record["parsed_date"])
         patient_name = record.get("Patient", "N/A").title()
         monthly_patients[month_key][patient_name] += 1
 
     if not monthly_patients:
-        return "Nenhum paciente encontrado."
+        return MSG_ANALYTICS_NO_PATIENTS
 
     message = "👤 *Ranking de Pacientes por Mês*\n"
     sorted_months = sorted(monthly_patients.keys(), key=lambda m: datetime.strptime(m, "%m/%Y"))
