@@ -12,13 +12,25 @@ from constants import (
     CALC_AWAITING_DATE,
     CALC_AWAITING_RANGE,
     CALC_SELECTING_MODE,
+    DATE_FORMAT,
+    MSG_CALC_CHOOSE_PERIOD,
+    MSG_CALC_DAY_SUMMARY,
+    MSG_CALC_DAY_TOTAL,
+    MSG_CALC_GRAND_TOTAL,
+    MSG_CALC_INVALID_DATE_RANGE,
+    MSG_CALC_NO_RECORDS_FOUND,
 )
 from g_sheets import get_sheet
 from utils import (
+    format_currency,
+    get_all_parsed_records,
     get_brazil_datetime_now,
     get_date_range_for_sum,
     get_info_from_record,
     get_records_in_range,
+    handle_generic_error,
+    handle_sheet_error,
+    reply_or_edit,
     send_final_message,
 )
 
@@ -44,8 +56,7 @@ async def calcular_start(update: Update, context: CallbackContext) -> int:
         [InlineKeyboardButton("🔙 Voltar ao Menu", callback_data="menu_back")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    message = "📊 Escolha o período para a listagem dos atendimentos:"
-    await update.callback_query.edit_message_text(text=message, reply_markup=reply_markup)
+    await reply_or_edit(update, text=MSG_CALC_CHOOSE_PERIOD, reply_markup=reply_markup)
     return CALC_SELECTING_MODE
 
 
@@ -63,7 +74,7 @@ async def calcular_mode_selection(update: Update, context: CallbackContext) -> i
         start_date = last_day_of_previous_month.replace(day=7).date()
 
         context.user_data["calc_mode"] = "periodo"
-        date_input = f"{start_date.strftime('%d/%m/%Y')} {end_date.strftime('%d/%m/%Y')}"
+        date_input = f"{start_date.strftime(DATE_FORMAT)} {end_date.strftime(DATE_FORMAT)}"
         await process_sum_calculation(update, context, date_input)
         return ConversationHandler.END
 
@@ -81,7 +92,7 @@ async def calcular_mode_selection(update: Update, context: CallbackContext) -> i
         "mes": "📅 Digite o mês (MM/YYYY) de referência:",
         "periodo": "📅 Digite a data de início e fim (DD/MM/YYYY DD/MM/YYYY):",
     }
-    await query.edit_message_text(prompts[mode])
+    await reply_or_edit(update, prompts[mode])
     return CALC_AWAITING_RANGE if mode == "periodo" else CALC_AWAITING_DATE
 
 
@@ -105,49 +116,26 @@ async def process_sum_calculation(
 
     date_range_data = get_date_range_for_sum(mode, date_input)
     if not date_range_data:
-        if update.callback_query:
-            await update.callback_query.edit_message_text(
-                "⚠️ Data em formato inválido. Tente novamente ou /cancelar."
-            )
-        else:
-            await update.effective_message.reply_text(
-                "⚠️ Data em formato inválido. Tente novamente ou /cancelar."
-            )
-        # Determine which state to return to based on the mode
-        if mode == "periodo":
-            return CALC_AWAITING_RANGE
-        return CALC_AWAITING_DATE
+        await reply_or_edit(update, MSG_CALC_INVALID_DATE_RANGE)
+        return CALC_AWAITING_RANGE if mode == "periodo" else CALC_AWAITING_DATE
 
     start_date, end_date, period_str = date_range_data
 
     sheet = get_sheet()
     if not sheet:
-        if update.callback_query:
-            await update.callback_query.edit_message_text(
-                "⚠️ Erro de configuração: Não foi possível conectar à planilha."
-            )
-        else:
-            await update.effective_message.reply_text(
-                "⚠️ Erro de configuração: Não foi possível conectar à planilha."
-            )
+        await handle_sheet_error(update)
         return ConversationHandler.END
 
     try:
-        records_in_range = get_records_in_range(sheet, start_date, end_date)
+        all_records = get_all_parsed_records(sheet)
+        records_in_range = get_records_in_range(all_records, start_date, end_date)
         count = len(records_in_range)
 
         if count == 0:
-            if update.callback_query:
-                await update.callback_query.edit_message_text(
-                    f"ℹ️ Nenhum atendimento encontrado para {period_str}."
-                )
-            else:
-                await update.effective_message.reply_text(
-                    f"ℹ️ Nenhum atendimento encontrado para {period_str}."
-                )
+            await reply_or_edit(update, MSG_CALC_NO_RECORDS_FOUND.format(period_str))
         else:
-            total = sum(record["Price"] for record in records_in_range)
-            total_str = f"{total:.2f}".replace(".", ",")
+            total = sum(record["parsed_price"] for record in records_in_range)
+            total_str = format_currency(total)
 
             # Group records by date for detailed breakdown
             records_by_date = defaultdict(list)
@@ -156,7 +144,7 @@ async def process_sum_calculation(
 
             # Sort dates for chronological order
             sorted_dates = sorted(
-                records_by_date.keys(), key=lambda d: datetime.strptime(d, "%d/%m/%Y")
+                records_by_date.keys(), key=lambda d: datetime.strptime(d, DATE_FORMAT)
             )
 
             message_parts = []
@@ -166,20 +154,24 @@ async def process_sum_calculation(
                     message_parts.append("\n" + "─" * 20 + "\n")
 
                 day_records = records_by_date[date_str]
-                day_total = sum(r["Price"] for r in day_records)
-                day_total_str = f"{day_total:.2f}".replace(".", ",")
+                day_total = sum(r["parsed_price"] for r in day_records)
+                day_total_str = format_currency(day_total)
                 record_count = len(day_records)
                 record_text = "atendimento" if record_count == 1 else "atendimentos"
 
                 # Add a more structured header for the day
-                message_parts.append(f"🗓️ *{date_str}* ({record_count} {record_text})")
+                message_parts.append(
+                    MSG_CALC_DAY_SUMMARY.format(
+                        date=date_str, count=record_count, record_text=record_text
+                    )
+                )
 
                 # Add individual records for the day
                 for record in day_records:
                     patient, procs_display, price_str = get_info_from_record(record=record)
-                    message_parts.append(f"  • *{patient}* | {procs_display} | R$ {price_str}")
+                    message_parts.append(f"  • *{patient}* | {procs_display} | {price_str}")
 
-                message_parts.append(f"\n💰 *Total do Dia:* R$ {day_total_str}")
+                message_parts.append(MSG_CALC_DAY_TOTAL.format(total=day_total_str))
 
             # Add a final separator before the grand total if applicable
             if mode != "dia" and len(sorted_dates) > 1:
@@ -189,20 +181,14 @@ async def process_sum_calculation(
 
             # Add grand total summary if not for a single day
             if mode != "dia":
-                message += (
-                    f"\n\n📊 *Total de {count} atendimentos para {period_str}: R$ {total_str}*"
+                message += MSG_CALC_GRAND_TOTAL.format(
+                    count=count, period=period_str, total=total_str
                 )
 
-            if update.callback_query:
-                await update.callback_query.edit_message_text(message, parse_mode="Markdown")
-            else:
-                await update.effective_message.reply_text(message, parse_mode="Markdown")
+            await reply_or_edit(update, message, parse_mode="Markdown")
+
     except Exception as e:
-        logger.error(f"Error in process_sum_calculation: {e}")
-        if update.callback_query:
-            await update.callback_query.edit_message_text(f"⚠️ Erro ao calcular o total: {e}")
-        else:
-            await update.effective_message.reply_text(f"⚠️ Erro ao calcular o total: {e}")
+        return await handle_generic_error(update, e, context)
 
     await send_final_message(update)
     context.user_data.clear()

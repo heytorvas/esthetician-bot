@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -8,13 +7,34 @@ from telegram.ext import (
 )
 
 from constants import (
+    DATE_FORMAT,
     DEL_AWAITING_DATE,
     DEL_CONFIRMING,
     DEL_SELECTING_RECORD,
+    MSG_DEL_ASK_DATE,
+    MSG_DEL_CONFIRM,
+    MSG_DEL_RETURN_TO_LIST,
+    MSG_DEL_SELECT_RECORD,
+    MSG_DEL_SUCCESS,
+    MSG_ERROR_DELETION,
+    MSG_ERROR_INVALID_DATE_FORMAT_DDMM,
+    MSG_ERROR_NO_RECORDS_FOUND_FOR_DATE,
+    MSG_ERROR_RECORD_NOT_FOUND,
+    MSG_OPERATION_CANCELLED,
+    MSG_PROMPT_DATE_DDMM,
 )
 from g_sheets import get_sheet
 from handlers.commons import menu_command
-from utils import get_brazil_datetime_now, get_info_from_record, send_final_message
+from utils import (
+    get_all_parsed_records,
+    get_brazil_datetime_now,
+    get_info_from_record,
+    get_records_in_range,
+    handle_sheet_error,
+    parse_ddmm_date,
+    reply_or_edit,
+    send_final_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +49,7 @@ async def deletar_start(update: Update, context: CallbackContext) -> int:
         [InlineKeyboardButton("🔙 Voltar ao Menu", callback_data="menu_back")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    message = "🗑️ Para qual data você deseja deletar um atendimento?"
-    await update.callback_query.edit_message_text(text=message, reply_markup=reply_markup)
+    await reply_or_edit(update, text=MSG_DEL_ASK_DATE, reply_markup=reply_markup)
     return DEL_AWAITING_DATE
 
 
@@ -44,72 +63,47 @@ async def deletar_date_selection(update: Update, context: CallbackContext) -> in
         selected_date = get_brazil_datetime_now().date()
         return await list_records_for_deletion(update, context, selected_date)
     if choice == "del_other_date":
-        await query.edit_message_text("📅 Por favor, digite a data no formato `DD/MM`.")
+        await reply_or_edit(update, MSG_PROMPT_DATE_DDMM)
         return DEL_AWAITING_DATE
     return ConversationHandler.END
-
-
-def get_records_with_row_numbers(sheet, target_date) -> list[dict]:
-    """Fetches records for a date and includes their row number."""
-    all_values = sheet.get_all_values()
-    header = all_values[0]
-    records_with_rows = []
-    for i, row in enumerate(all_values[1:], start=2):  # Start from row 2
-        try:
-            record_date_str = row[header.index("Date")]
-            record_date = datetime.strptime(record_date_str, "%d/%m/%Y").date()
-            if record_date == target_date:
-                record = dict(zip(header, row, strict=False))
-                record["row_number"] = i
-                record["Price"] = float(str(record.get("Price", "0")).replace(",", "."))
-                records_with_rows.append(record)
-        except (ValueError, TypeError, IndexError):
-            continue
-    return records_with_rows
 
 
 async def list_records_for_deletion(update: Update, context: CallbackContext, target_date) -> int:
     """Lists records for a given date as selectable buttons for deletion."""
     sheet = get_sheet()
     if not sheet:
-        error_message = "⚠️ Erro de configuração: Não foi possível conectar à planilha."
-        if update.callback_query:
-            await update.callback_query.edit_message_text(error_message)
-        else:
-            await update.message.reply_text(error_message)
+        await handle_sheet_error(update)
         return ConversationHandler.END
 
-    records_to_delete = get_records_with_row_numbers(sheet, target_date)
+    all_records = get_all_parsed_records(sheet, include_row_number=True)
+    records_to_delete = get_records_in_range(all_records, target_date, target_date)
+
+    date_str = target_date.strftime(DATE_FORMAT)
     if not records_to_delete:
-        message = f"ℹ️ Nenhum atendimento encontrado para {target_date.strftime('%d/%m/%Y')}."
+        message = MSG_ERROR_NO_RECORDS_FOUND_FOR_DATE.format(date_str)
         if update.callback_query:
             await update.callback_query.answer(text=message, show_alert=True)
             await menu_command(update, context)
         else:
-            await update.message.reply_text(f"{message} Use /menu para começar de novo.")
+            await reply_or_edit(update, f"{message} Use /menu para começar de novo.")
         return ConversationHandler.END
 
     context.user_data["records_for_deletion"] = records_to_delete
     context.user_data["delete_date"] = target_date
 
     keyboard = []
-    message = f"Selecione o atendimento para deletar em *{target_date.strftime('%d/%m/%Y')}*:\n\n"
+    message = MSG_DEL_SELECT_RECORD.format(date_str)
 
     for record in records_to_delete:
         patient, procs_display, price_str = get_info_from_record(record=record)
-        button_text = f"{patient} | {procs_display} | R$ {price_str}"
+        button_text = f"{patient} | {procs_display} | {price_str}"
         callback_data = f"del_record_{record['row_number']}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
     keyboard.append([InlineKeyboardButton("🔙 Cancelar", callback_data="cancel_delete")])
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            message, reply_markup=reply_markup, parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(message, reply_markup=reply_markup, parse_mode="Markdown")
+    await reply_or_edit(update, message, reply_markup=reply_markup, parse_mode="Markdown")
 
     return DEL_SELECTING_RECORD
 
@@ -117,15 +111,11 @@ async def list_records_for_deletion(update: Update, context: CallbackContext, ta
 async def deletar_receive_date(update: Update, context: CallbackContext) -> int:
     """Receives a custom date and lists records for deletion."""
     date_str = update.message.text
-    try:
-        current_year = get_brazil_datetime_now().year
-        target_date = datetime.strptime(f"{date_str}/{current_year}", "%d/%m/%Y").date()
-        return await list_records_for_deletion(update, context, target_date)
-    except ValueError:
-        await update.message.reply_text(
-            "⚠️ Data inválida. Use o formato DD/MM. Tente novamente ou use /cancelar."
-        )
+    target_date = parse_ddmm_date(date_str)
+    if not target_date:
+        await reply_or_edit(update, MSG_ERROR_INVALID_DATE_FORMAT_DDMM)
         return DEL_AWAITING_DATE
+    return await list_records_for_deletion(update, context, target_date)
 
 
 async def deletar_ask_confirmation(update: Update, context: CallbackContext) -> int:
@@ -140,17 +130,12 @@ async def deletar_ask_confirmation(update: Update, context: CallbackContext) -> 
     record_to_delete = next((r for r in records if r["row_number"] == row_number), None)
 
     if not record_to_delete:
-        await query.edit_message_text("⚠️ Erro: Atendimento não encontrado. Tente novamente.")
+        await reply_or_edit(update, MSG_ERROR_RECORD_NOT_FOUND)
         return await list_records_for_deletion(update, context, context.user_data["delete_date"])
 
     patient, procs_display, price_str = get_info_from_record(record=record_to_delete)
 
-    message = (
-        f"Você tem certeza que deseja deletar o seguinte atendimento?\n\n"
-        f"👤 *Paciente:* {patient}\n"
-        f"📋 *Procedimentos:* {procs_display}\n"
-        f"💰 *Valor:* R$ {price_str}"
-    )
+    message = MSG_DEL_CONFIRM.format(patient=patient, procedures=procs_display, price=price_str)
 
     keyboard = [
         [
@@ -159,7 +144,7 @@ async def deletar_ask_confirmation(update: Update, context: CallbackContext) -> 
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(message, reply_markup=reply_markup, parse_mode="Markdown")
+    await reply_or_edit(update, message, reply_markup=reply_markup, parse_mode="Markdown")
 
     return DEL_CONFIRMING
 
@@ -173,9 +158,9 @@ async def deletar_receive_selection(update: Update, context: CallbackContext) ->
     if choice == "del_confirm_no":
         target_date = context.user_data.get("delete_date")
         if target_date:
-            await query.edit_message_text("Ok, voltando para a lista de atendimentos.")
+            await reply_or_edit(update, MSG_DEL_RETURN_TO_LIST)
             return await list_records_for_deletion(update, context, target_date)
-        await query.edit_message_text("Operação cancelada.")
+        await reply_or_edit(update, MSG_OPERATION_CANCELLED)
         await menu_command(update, context)
         return ConversationHandler.END
 
@@ -187,13 +172,11 @@ async def deletar_receive_selection(update: Update, context: CallbackContext) ->
 
         sheet = get_sheet()
         if not sheet:
-            await query.edit_message_text(
-                "⚠️ Erro de configuração: Não foi possível conectar à planilha."
-            )
+            await handle_sheet_error(update)
             return ConversationHandler.END
 
         sheet.delete_rows(row_number_to_delete)
-        await query.edit_message_text("✅ Atendimento deletado com sucesso!")
+        await reply_or_edit(update, MSG_DEL_SUCCESS)
 
         # Send the standard final message
         await send_final_message(update)
@@ -203,7 +186,5 @@ async def deletar_receive_selection(update: Update, context: CallbackContext) ->
 
     except (ValueError, IndexError) as e:
         logger.error(f"Error during deletion confirmation: {e}")
-        await query.edit_message_text(
-            "⚠️ Ocorreu um erro ao processar a sua seleção. Tente novamente."
-        )
+        await reply_or_edit(update, MSG_ERROR_DELETION)
         return ConversationHandler.END

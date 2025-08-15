@@ -66,17 +66,18 @@ async def menu_router(update: Update, context: CallbackContext) -> int:
     """Routes main menu button presses to the correct conversation flow."""
     query = update.callback_query
     await query.answer()
-
     command = query.data
 
-    if command == "menu_registrar":
-        return await registrar_start(update, context)
-    if command == "menu_calcular":
-        return await calcular_start(update, context)
-    if command == "menu_deletar":
-        return await deletar_start(update, context)
-    if command == "menu_analytics":
-        return await analytics_start(update, context)
+    command_map = {
+        "menu_registrar": registrar_start,
+        "menu_calcular": calcular_start,
+        "menu_deletar": deletar_start,
+        "menu_analytics": analytics_start,
+    }
+
+    if command in command_map:
+        return await command_map[command](update, context)
+
     if command == "menu_procedimentos":
         await procedimentos_command(update, context)
         await send_final_message(update)
