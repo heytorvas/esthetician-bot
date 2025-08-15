@@ -34,6 +34,6 @@ PROCEDURE_DESCRIPTIONS = {
     "3mh": "3MH",
     "compex": "Compex",
     "drenagem": "Drenagem",
-    "hybrius": "Hybrius"
+    "hybrius": "Hybrius",
 }
 VALID_PRICES = [5, 10, 15, 20]

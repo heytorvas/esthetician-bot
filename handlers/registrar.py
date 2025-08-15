@@ -185,7 +185,7 @@ async def save_record_and_summarize(update: Update, context: CallbackContext) ->
         procedure_names = [PROCEDURE_DESCRIPTIONS[slug] for slug in procedure_slugs]
         price = user_data["price"]
 
-        row = [date_obj.strftime("%d/%m/%Y"), patient, ", ".join(procedure_names).upper(), price]
+        row = [date_obj.strftime("%d/%m/%Y"), patient, ", ".join(procedure_slugs).upper(), price]
         sheet.append_row(row)
 
         summary_text = (
@@ -243,7 +243,8 @@ async def registrar_confirm_more(update: Update, context: CallbackContext) -> in
 def registrar_build_procedures_keyboard(selected_slugs: set) -> InlineKeyboardMarkup:
     """Builds the keyboard for procedure selection with checkmarks."""
     keyboard = []
-    for slug, description in PROCEDURE_DESCRIPTIONS.items():
+    for slug in sorted(PROCEDURE_DESCRIPTIONS):
+        description = PROCEDURE_DESCRIPTIONS[slug]
         text = f"✅ {description}" if slug in selected_slugs else f"⬜️ {description}"
         keyboard.append([InlineKeyboardButton(text, callback_data=f"proc_{slug}")])
     keyboard.append([InlineKeyboardButton("➡️ Continuar", callback_data="proc_done")])

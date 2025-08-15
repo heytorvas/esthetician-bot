@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 
 from telegram import Update
 
+from constants import PROCEDURE_DESCRIPTIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,6 +16,18 @@ def slugify(text):
     text = text.lower()
     text = text.replace(" ", "").replace("-", "")
     return text
+
+
+def get_info_from_record(record: dict) -> tuple[str, str, str]:
+    patient = record.get("Patient", "N/A").title()
+    procs_str = record.get("Procedures", "N/A")
+    procedure_names = [
+        PROCEDURE_DESCRIPTIONS.get(slug)
+        for slug in [p.strip().lower() for p in procs_str.split(",")]
+    ]
+    procs_display = ", ".join(procedure_names)
+    price = f"{record.get('Price', 0.0):.2f}".replace(".", ",")
+    return patient, procs_display, price
 
 
 def get_records_in_range(sheet, start_date, end_date) -> list[dict]:

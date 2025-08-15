@@ -12,15 +12,14 @@ from constants import (
     CALC_AWAITING_DATE,
     CALC_AWAITING_RANGE,
     CALC_SELECTING_MODE,
-    PROCEDURE_DESCRIPTIONS,
 )
 from g_sheets import get_sheet
 from utils import (
     get_brazil_datetime_now,
     get_date_range_for_sum,
+    get_info_from_record,
     get_records_in_range,
     send_final_message,
-    slugify,
 )
 
 logger = logging.getLogger(__name__)
@@ -177,18 +176,10 @@ async def process_sum_calculation(
 
                 # Add individual records for the day
                 for record in day_records:
-                    patient = record.get("Patient", "N/A").title()
-                    procs_str = record.get("Procedures", "N/A")
-                    procedure_slugs = [slugify(p.strip()) for p in procs_str.split(",")]
-                    procedure_names = [
-                        PROCEDURE_DESCRIPTIONS.get(slug, slug.upper()) for slug in procedure_slugs
-                    ]
-                    procs_display = ", ".join(procedure_names)
-                    price = record.get("Price", 0.0)
-                    price_str = f"{price:.2f}".replace(".", ",")
+                    patient, procs_display, price_str = get_info_from_record(record=record)
                     message_parts.append(f"  • *{patient}* | {procs_display} | R$ {price_str}")
 
-                message_parts.append(f"\n💰 *Total do Dia:* R$ {day_total_str}\n")
+                message_parts.append(f"\n💰 *Total do Dia:* R$ {day_total_str}")
 
             # Add a final separator before the grand total if applicable
             if mode != "dia" and len(sorted_dates) > 1:

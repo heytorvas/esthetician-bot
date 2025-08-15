@@ -11,11 +11,10 @@ from constants import (
     DEL_AWAITING_DATE,
     DEL_CONFIRMING,
     DEL_SELECTING_RECORD,
-    PROCEDURE_DESCRIPTIONS,
 )
 from g_sheets import get_sheet
 from handlers.commons import menu_command
-from utils import get_brazil_datetime_now, send_final_message, slugify
+from utils import get_brazil_datetime_now, get_info_from_record, send_final_message
 
 logger = logging.getLogger(__name__)
 
@@ -96,34 +95,9 @@ async def list_records_for_deletion(update: Update, context: CallbackContext, ta
     keyboard = []
     message = f"Selecione o atendimento para deletar em *{target_date.strftime('%d/%m/%Y')}*:\n\n"
 
-    # Create a reverse mapping from slug to proper case
-    slug_to_proper_case = {slug: desc for slug, desc in PROCEDURE_DESCRIPTIONS.items()}
-    # Create a mapping from the sheet's format (uppercase, no space) to slug
-    sheet_format_to_slug = {
-        slugify(desc).upper(): slug for slug, desc in PROCEDURE_DESCRIPTIONS.items()
-    }
-
     for record in records_to_delete:
-        patient = record.get("Patient", "N/A").title()
-        procs_str = record.get("Procedures", "N/A")
-
-        # Map uppercase procedures from sheet to proper case for display
-        procs_list_from_sheet = [p.strip() for p in procs_str.split(",")]
-
-        proper_procs_list = []
-        for proc_from_sheet in procs_list_from_sheet:
-            # Normalize the string from the sheet in the same way slugs are created, but keep it uppercase
-            sheet_slug = slugify(proc_from_sheet).upper()
-            # Find the original slug
-            original_slug = sheet_format_to_slug.get(sheet_slug)
-            # Get the proper description
-            proper_name = slug_to_proper_case.get(original_slug, proc_from_sheet)
-            proper_procs_list.append(proper_name)
-
-        procs_display = ", ".join(proper_procs_list)
-
-        price = record.get("Price", 0.0)
-        button_text = f"{patient} | {procs_display} | R$ {price:.2f}".replace(".", ",")
+        patient, procs_display, price_str = get_info_from_record(record=record)
+        button_text = f"{patient} | {procs_display} | R$ {price_str}"
         callback_data = f"del_record_{record['row_number']}"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
@@ -169,19 +143,13 @@ async def deletar_ask_confirmation(update: Update, context: CallbackContext) -> 
         await query.edit_message_text("⚠️ Erro: Atendimento não encontrado. Tente novamente.")
         return await list_records_for_deletion(update, context, context.user_data["delete_date"])
 
-    upper_to_proper_case = {v.upper(): v for v in PROCEDURE_DESCRIPTIONS.values()}
-    patient = record_to_delete.get("Patient", "N/A").title()
-    procs_str = record_to_delete.get("Procedures", "N/A")
-    procs_list_upper = procs_str.split(", ")
-    proper_procs_list = [upper_to_proper_case.get(p, p) for p in procs_list_upper]
-    procs_display = ", ".join(proper_procs_list)
-    price = record_to_delete.get("Price", 0.0)
+    patient, procs_display, price_str = get_info_from_record(record=record_to_delete)
 
     message = (
         f"Você tem certeza que deseja deletar o seguinte atendimento?\n\n"
         f"👤 *Paciente:* {patient}\n"
         f"📋 *Procedimentos:* {procs_display}\n"
-        f"💰 *Valor:* R$ {price:.2f}".replace(".", ",")
+        f"💰 *Valor:* R$ {price_str}"
     )
 
     keyboard = [

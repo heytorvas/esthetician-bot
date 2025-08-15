@@ -88,7 +88,8 @@ async def menu_router(update: Update, context: CallbackContext) -> int:
 async def procedimentos_command(update: Update, context: CallbackContext) -> None:
     """Lists all available procedures and their descriptions."""
     message = "📋 Procedimentos Disponíveis:\n\n"
-    for slug, description in PROCEDURE_DESCRIPTIONS.items():
+    for slug in sorted(PROCEDURE_DESCRIPTIONS):
+        description = PROCEDURE_DESCRIPTIONS[slug]
         message += f"• {description}\n"
     if update.callback_query:
         await update.callback_query.edit_message_text(message)
