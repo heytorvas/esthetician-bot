@@ -35,5 +35,6 @@ PROCEDURE_DESCRIPTIONS = {
     "compex": "Compex",
     "drenagem": "Drenagem",
     "hybrius": "Hybrius",
+    "carboxiterapia": "Carboxiterapia",
 }
 VALID_PRICES = [5, 10, 15, 20]
