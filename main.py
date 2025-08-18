@@ -16,6 +16,8 @@ from constants import (
     ANALYTICS_MENU,
     CALC_AWAITING_DATE,
     CALC_AWAITING_RANGE,
+    CALC_GET_CUSTOM_MONTH,
+    CALC_MONTHLY_REPORT_CHOICE,
     CALC_SELECTING_MODE,
     DEL_AWAITING_DATE,
     DEL_CONFIRMING,
@@ -31,6 +33,8 @@ from constants import (
 from handlers.analytics import analytics_router, analytics_start
 from handlers.calcular import (
     calcular_mode_selection,
+    calcular_monthly_report_choice,
+    calcular_receive_custom_month,
     calcular_receive_date,
     calcular_receive_range,
     calcular_start,
@@ -162,6 +166,12 @@ def main() -> None:
                 CallbackQueryHandler(registrar_confirm_more, pattern="^reg_another_")
             ],
             CALC_SELECTING_MODE: [CallbackQueryHandler(calcular_mode_selection, pattern="^calc_")],
+            CALC_MONTHLY_REPORT_CHOICE: [
+                CallbackQueryHandler(calcular_monthly_report_choice, pattern="^calc_monthly_")
+            ],
+            CALC_GET_CUSTOM_MONTH: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, calcular_receive_custom_month)
+            ],
             CALC_AWAITING_DATE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, calcular_receive_date)
             ],

@@ -1,6 +1,6 @@
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -11,6 +11,8 @@ from telegram.ext import (
 from constants import (
     CALC_AWAITING_DATE,
     CALC_AWAITING_RANGE,
+    CALC_GET_CUSTOM_MONTH,
+    CALC_MONTHLY_REPORT_CHOICE,
     CALC_SELECTING_MODE,
     DATE_FORMAT,
     MSG_CALC_CHOOSE_PERIOD,
@@ -18,7 +20,10 @@ from constants import (
     MSG_CALC_DAY_TOTAL,
     MSG_CALC_GRAND_TOTAL,
     MSG_CALC_INVALID_DATE_RANGE,
+    MSG_CALC_INVALID_MONTH_FORMAT,
+    MSG_CALC_MONTHLY_REPORT_PROMPT,
     MSG_CALC_NO_RECORDS_FOUND,
+    MSG_CALC_PROMPT_CUSTOM_MONTH,
 )
 from g_sheets import get_sheet
 from utils import (
@@ -27,6 +32,7 @@ from utils import (
     get_brazil_datetime_now,
     get_date_range_for_sum,
     get_info_from_record,
+    get_monthly_report_date_range,
     get_records_in_range,
     handle_generic_error,
     handle_sheet_error,
@@ -67,16 +73,23 @@ async def calcular_mode_selection(update: Update, context: CallbackContext) -> i
 
     if query.data == "calc_monthly_report":
         now = get_brazil_datetime_now()
-        end_date = now.replace(day=6).date()
-        # Go to the first day of the current month, then subtract one day to get to the last day of the previous month
-        first_day_of_current_month = now.replace(day=1)
-        last_day_of_previous_month = first_day_of_current_month - timedelta(days=1)
-        start_date = last_day_of_previous_month.replace(day=7).date()
-
-        context.user_data["calc_mode"] = "periodo"
-        date_input = f"{start_date.strftime(DATE_FORMAT)} {end_date.strftime(DATE_FORMAT)}"
-        await process_sum_calculation(update, context, date_input)
-        return ConversationHandler.END
+        current_month_str = now.strftime("%m/%Y")
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"Este Mês [{current_month_str}]",
+                    callback_data="calc_monthly_this",
+                )
+            ],
+            [InlineKeyboardButton("Outro Mês", callback_data="calc_monthly_other")],
+            [InlineKeyboardButton("🔙 Voltar", callback_data="calc_back_to_mode_selection")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            MSG_CALC_MONTHLY_REPORT_PROMPT,
+            reply_markup=reply_markup,
+        )
+        return CALC_MONTHLY_REPORT_CHOICE
 
     parts = query.data.split("_")
     mode, period = parts[1], parts[2] if len(parts) > 2 else None
@@ -94,6 +107,45 @@ async def calcular_mode_selection(update: Update, context: CallbackContext) -> i
     }
     await reply_or_edit(update, prompts[mode])
     return CALC_AWAITING_RANGE if mode == "periodo" else CALC_AWAITING_DATE
+
+
+async def calcular_monthly_report_choice(update: Update, context: CallbackContext) -> int:
+    """Handles the choice for the monthly report (current or other month)."""
+    query = update.callback_query
+    await query.answer()
+    context.user_data["calc_mode"] = "periodo"
+
+    if query.data == "calc_monthly_this":
+        # Get date range for the current month's report
+        date_range = get_monthly_report_date_range()
+        start_date, end_date = date_range
+        date_input = f"{start_date.strftime(DATE_FORMAT)} {end_date.strftime(DATE_FORMAT)}"
+        await process_sum_calculation(update, context, date_input)
+        return ConversationHandler.END
+
+    if query.data == "calc_monthly_other":
+        await query.edit_message_text(MSG_CALC_PROMPT_CUSTOM_MONTH)
+        return CALC_GET_CUSTOM_MONTH
+
+    # Handle 'calc_back_to_mode_selection'
+    return await calcular_start(update, context)
+
+
+async def calcular_receive_custom_month(update: Update, context: CallbackContext) -> int:
+    """Receives a custom month (MM/YYYY) for the monthly report."""
+    month_input = update.message.text
+    context.user_data["calc_mode"] = "periodo"
+
+    date_range = get_monthly_report_date_range(month_str=month_input)
+
+    if not date_range:
+        await update.message.reply_text(MSG_CALC_INVALID_MONTH_FORMAT)
+        return CALC_GET_CUSTOM_MONTH
+
+    start_date, end_date = date_range
+    date_range_str = f"{start_date.strftime(DATE_FORMAT)} {end_date.strftime(DATE_FORMAT)}"
+    await process_sum_calculation(update, context, date_range_str)
+    return ConversationHandler.END
 
 
 async def calcular_receive_date(update: Update, context: CallbackContext) -> int:
@@ -147,7 +199,14 @@ async def process_sum_calculation(
                 records_by_date.keys(), key=lambda d: datetime.strptime(d, DATE_FORMAT)
             )
 
-            message_parts = []
+            # Add a header for the report period
+            report_header = (
+                f"📄 *Relatório de Atendimentos*\n"
+                f"🗓️ *Período:* de {start_date.strftime(DATE_FORMAT)} a {end_date.strftime(DATE_FORMAT)}\n"
+                f"{'═' * 20}\n"
+            )
+            message_parts = [report_header]
+
             for i, date_str in enumerate(sorted_dates):
                 # Add a separator between days
                 if i > 0:
@@ -181,9 +240,7 @@ async def process_sum_calculation(
 
             # Add grand total summary if not for a single day
             if mode != "dia":
-                message += MSG_CALC_GRAND_TOTAL.format(
-                    count=count, period=period_str, total=total_str
-                )
+                message += MSG_CALC_GRAND_TOTAL.format(count=count, total=total_str)
 
             await reply_or_edit(update, message, parse_mode="Markdown")
 

@@ -140,6 +140,34 @@ def get_date_range_for_sum(mode: str, date_input: str | None) -> tuple[date, dat
         return None
 
 
+def get_monthly_report_date_range(
+    month_str: str | None = None,
+) -> tuple[date, date] | None:
+    """Calculates the monthly report date range (day 7 to day 6 of next month).
+    If month_str (MM/YYYY) is provided, it's used as the reference.
+    If None, the current month is used as the reference.
+    """
+    try:
+        # Determine the reference date: either from the input string or the current time
+        if month_str:
+            ref_date = datetime.strptime(month_str, "%m/%Y")
+        else:
+            ref_date = get_brazil_datetime_now()
+
+        # The start date is the 7th of the reference month.
+        start_date = ref_date.replace(day=7).date()
+
+        # To robustly find the next month, go to the 1st of the reference month,
+        # add 32 days (which always lands in the next month), and then set the day to 6.
+        first_day_of_ref_month = ref_date.replace(day=1)
+        next_month_date = first_day_of_ref_month + timedelta(days=32)
+        end_date = next_month_date.replace(day=6).date()
+
+        return start_date, end_date
+    except (ValueError, AttributeError):
+        return None
+
+
 def parse_ddmm_date(date_str: str) -> date | None:
     """Parses a DD/MM date string, assuming the current year."""
     try:

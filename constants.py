@@ -13,13 +13,15 @@
     CALC_SELECTING_MODE,
     CALC_AWAITING_DATE,
     CALC_AWAITING_RANGE,
+    CALC_MONTHLY_REPORT_CHOICE,
+    CALC_GET_CUSTOM_MONTH,
     # Analytics States
     ANALYTICS_MENU,
     # Deletar States
     DEL_AWAITING_DATE,
     DEL_SELECTING_RECORD,
     DEL_CONFIRMING,
-) = range(14)
+) = range(16)
 
 PROCEDURE_DESCRIPTIONS = {
     "radiofrequencia": "Radiofrequência",
@@ -102,7 +104,12 @@ MSG_CALC_INVALID_DATE_RANGE = "⚠️ Data em formato inválido. Tente novamente
 MSG_CALC_NO_RECORDS_FOUND = "ℹ️ Nenhum atendimento encontrado para {}."
 MSG_CALC_DAY_SUMMARY = "🗓️ *{date}* ({count} {record_text})"
 MSG_CALC_DAY_TOTAL = "\n💰 *Total do Dia:* R$ {total}"
-MSG_CALC_GRAND_TOTAL = "\n\n📊 *Total de {count} atendimentos para {period}: R$ {total}*"
+MSG_CALC_GRAND_TOTAL = "\n\n📊 *Total de {count} atendimentos: R$ {total}*"
+MSG_CALC_PROMPT_CUSTOM_MONTH = "📅 Por favor, digite o mês e ano no formato `MM/YYYY`:"
+MSG_CALC_INVALID_MONTH_FORMAT = (
+    "⚠️ Formato de data inválido. Por favor, use `MM/YYYY`. Tente novamente ou /cancelar."
+)
+MSG_CALC_MONTHLY_REPORT_PROMPT = "Gerar relatório mensal para o mês atual ou escolher outro?"
 
 # Analytics Command
 MSG_ANALYTICS_MENU = "📈 *Menu de Análises*\n\nEscolha qual relatório você deseja ver:"
