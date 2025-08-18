@@ -103,8 +103,8 @@ MSG_CALC_CHOOSE_PERIOD = "📊 Escolha o período para a listagem dos atendiment
 MSG_CALC_INVALID_DATE_RANGE = "⚠️ Data em formato inválido. Tente novamente ou /cancelar."
 MSG_CALC_NO_RECORDS_FOUND = "ℹ️ Nenhum atendimento encontrado para {}."
 MSG_CALC_DAY_SUMMARY = "🗓️ *{date}* ({count} {record_text})"
-MSG_CALC_DAY_TOTAL = "\n💰 *Total do Dia:* R$ {total}"
-MSG_CALC_GRAND_TOTAL = "\n\n📊 *Total de {count} atendimentos: R$ {total}*"
+MSG_CALC_DAY_TOTAL = "\n💰 *Total do Dia:* {total}"
+MSG_CALC_GRAND_TOTAL = "\n\n📊 *Total de {count} atendimentos: {total}*"
 MSG_CALC_PROMPT_CUSTOM_MONTH = "📅 Por favor, digite o mês e ano no formato `MM/YYYY`:"
 MSG_CALC_INVALID_MONTH_FORMAT = (
     "⚠️ Formato de data inválido. Por favor, use `MM/YYYY`. Tente novamente ou /cancelar."
